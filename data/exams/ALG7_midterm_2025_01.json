@@ -1,0 +1,152 @@
+{
+  "examId": "ALG7_midterm_2025_01",
+  "examMeta": {
+    "grade": 7,
+    "topic": "Algebra",
+    "date": "2025-10-01"
+  },
+  "items": [
+    {
+      "itemId": "Q1",
+      "skillIds": [
+        "FRAC.SIMPLIFY"
+      ],
+      "maxPoints": 1
+    },
+    {
+      "itemId": "Q2",
+      "skillIds": [
+        "FRAC.SIMPLIFY"
+      ],
+      "maxPoints": 1
+    },
+    {
+      "itemId": "Q3",
+      "skillIds": [
+        "EQ.SOLVE_1VAR"
+      ],
+      "maxPoints": 2
+    },
+    {
+      "itemId": "Q4",
+      "skillIds": [
+        "EQ.SOLVE_1VAR"
+      ],
+      "maxPoints": 2
+    },
+    {
+      "itemId": "Q5",
+      "skillIds": [
+        "WORDPROB.MULTI_STEP"
+      ],
+      "maxPoints": 2
+    }
+  ],
+  "responses": [
+    {
+      "studentId": "S01",
+      "itemId": "Q1",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 50
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q2",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 62
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q3",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 90
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q4",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 105
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q5",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 140
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q1",
+      "isCorrect": true,
+      "score": 1.0,
+      "timeSpentSec": 30
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q2",
+      "isCorrect": true,
+      "score": 1.0,
+      "timeSpentSec": 28
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q3",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 60
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q4",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 70
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q5",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 80
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q1",
+      "isCorrect": true,
+      "score": 1.0,
+      "timeSpentSec": 45
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q2",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 70
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q3",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 100
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q4",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 120
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q5",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 120
+    }
+  ]
+}

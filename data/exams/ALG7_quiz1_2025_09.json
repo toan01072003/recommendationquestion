@@ -1,0 +1,96 @@
+{
+  "examId": "ALG7_quiz1_2025_09",
+  "examMeta": {
+    "grade": 7,
+    "topic": "Algebra",
+    "date": "2025-09-20"
+  },
+  "items": [
+    {
+      "itemId": "Q1",
+      "skillIds": [
+        "FRAC.SIMPLIFY"
+      ],
+      "maxPoints": 1
+    },
+    {
+      "itemId": "Q2",
+      "skillIds": [
+        "EQ.SOLVE_1VAR"
+      ],
+      "maxPoints": 2
+    },
+    {
+      "itemId": "Q3",
+      "skillIds": [
+        "WORDPROB.MULTI_STEP"
+      ],
+      "maxPoints": 2
+    }
+  ],
+  "responses": [
+    {
+      "studentId": "S01",
+      "itemId": "Q1",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 52
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q2",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 90
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q3",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 120
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q1",
+      "isCorrect": true,
+      "score": 1.0,
+      "timeSpentSec": 28
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q2",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 60
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q3",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 78
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q1",
+      "isCorrect": true,
+      "score": 1.0,
+      "timeSpentSec": 45
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q2",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 120
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q3",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 130
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "S01": [
+    {
+      "goal": "skill_mastery",
+      "skillId": "FRAC.SIMPLIFY",
+      "targetP": 0.7
+    },
+    {
+      "goal": "skill_mastery",
+      "skillId": "EQ.SOLVE_1VAR",
+      "targetP": 0.8
+    },
+    {
+      "goal": "skill_mastery",
+      "skillId": "WORDPROB.MULTI_STEP",
+      "targetP": 0.7
+    }
+  ]
+}
