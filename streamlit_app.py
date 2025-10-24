@@ -158,6 +158,7 @@ with st.sidebar:
     st.subheader("Thiết lập")
     lang = st.selectbox("Ngôn ngữ", options=["vi", "en"], index=0)
     max_q = st.number_input("Số câu gợi ý", min_value=1, max_value=20, value=6)
+    time_budget = st.number_input("Thời gian luyện (phút, tuỳ chọn)", min_value=0, max_value=240, value=0)
     st.markdown("GOOGLE_API_KEY phải có trong môi trường (hoặc secrets)")
 
 exam = st.file_uploader("Ảnh đề thi", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=False)
@@ -214,6 +215,8 @@ if run:
     # Build weak skills and procedural buckets
     weak: List[Dict[str, Any]] = []
     proc_buckets: Dict[Any, Any] = {}
+    err_freq_by_skill: Dict[str, int] = {}
+    points_by_skill: Dict[str, List[float]] = {}
     if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list):
         wrong_count = {}
         total_wrong = 0
@@ -226,6 +229,9 @@ if run:
                 continue
             wrong_count[sid] = wrong_count.get(sid, 0) + 1
             total_wrong += 1
+            err_freq_by_skill[sid] = err_freq_by_skill.get(sid, 0) + 1
+            if isinstance(it.get("points"), (int, float)):
+                points_by_skill.setdefault(sid, []).append(float(it.get("points")))
             etype = it.get("error_type") or "UNKNOWN"
             key = (sid, etype)
             b = proc_buckets.get(key, {"skillId": sid, "error_type": etype, "count": 0, "example": None})
@@ -249,8 +255,133 @@ if run:
     # Exam style to align difficulty/format
     exam_style = analyze_exam_style(model, exam_ref, lang) if exam_ref is not None else {}
 
+    # Aggregate: pbis by skill from demo data (if available)
+    def load_demo_exams() -> List[dict]:
+        base = os.path.join(os.path.dirname(__file__), "data", "exams")
+        exams = []
+        try:
+            for fname in sorted(os.listdir(base)):
+                if fname.endswith(".json"):
+                    with open(os.path.join(base, fname), "r", encoding="utf-8") as f:
+                        exams.append(json.load(f))
+        except Exception:
+            pass
+        return exams
+
+    def compute_pbis(arr_x: List[int], arr_y: List[float]) -> float:
+        try:
+            import numpy as np
+            X = np.array(arr_x, dtype=float)
+            Y = np.array(arr_y, dtype=float)
+            if len(X) < 3 or np.std(X) == 0 or np.std(Y) == 0:
+                return 0.0
+            return float(np.corrcoef(X, Y)[0, 1])
+        except Exception:
+            return 0.0
+
+    def pbis_by_skill_from_demo() -> Dict[str, float]:
+        exams = load_demo_exams()
+        if not exams:
+            return {}
+        pbis_items = []  # (skillId, pbis)
+        for exam in exams:
+            students = sorted({r["studentId"] for r in exam.get("responses", [])})
+            totals = {sid: 0.0 for sid in students}
+            for r in exam.get("responses", []):
+                totals[r["studentId"]] += float(r.get("score", 0.0))
+            item_ids = [it["itemId"] for it in exam.get("items", [])]
+            totals_without = {iid: {sid: totals[sid] for sid in students} for iid in item_ids}
+            for iid in item_ids:
+                for sid in students:
+                    sc = 0.0
+                    for r in exam.get("responses", []):
+                        if r["studentId"] == sid and r["itemId"] == iid:
+                            sc = float(r.get("score", 0.0))
+                            break
+                    totals_without[iid][sid] -= sc
+            for it in exam.get("items", []):
+                iid = it["itemId"]
+                obs = [int(r.get("isCorrect")) for r in exam.get("responses", []) if r.get("itemId") == iid]
+                if not obs:
+                    continue
+                pb = compute_pbis(obs, [totals_without[iid][sid] for sid in students])
+                for s in it.get("skillIds", []):
+                    pbis_items.append((s, pb))
+        by_skill: Dict[str, List[float]] = {}
+        for s, v in pbis_items:
+            by_skill.setdefault(s, []).append(float(v))
+        return {s: round(sum(vs)/len(vs), 3) for s, vs in by_skill.items() if vs}
+
+    pbis_by_skill = pbis_by_skill_from_demo()
+
+    # Weighted plan under goal constraints (severity + points + pbis)
+    # Normalize points and pbis for weak skills only
+    def norm_map(d: Dict[str, float]) -> Dict[str, float]:
+        if not d:
+            return {}
+        vals = [v for v in d.values() if isinstance(v, (int, float))]
+        if not vals:
+            return {}
+        mn, mx = min(vals), max(vals)
+        if mx - mn < 1e-9:
+            return {k: 0.5 for k in d}
+        return {k: (float(v) - mn) / (mx - mn) for k, v in d.items()}
+
+    avg_points_by_skill = {k: (sum(v)/len(v)) for k, v in points_by_skill.items() if v}
+    norm_points = norm_map(avg_points_by_skill)
+    norm_pbis = norm_map({k: pbis_by_skill.get(k, 0.0) for k in {w["skillId"] for w in weak}})
+
+    # Blend into severity
+    blended_weak: List[Dict[str, Any]] = []
+    for w in weak:
+        sid = w.get("skillId")
+        base = float(w.get("severity", 0.3))
+        pw = norm_points.get(sid, 0.5)
+        pb = norm_pbis.get(sid, 0.5)
+        blended = 0.6 * base + 0.25 * pw + 0.15 * pb
+        blended_weak.append({"skillId": sid, "severity": round(float(blended), 3), "base_severity": base, "points_w": pw, "pbis_w": pb})
+
+    # Build plan with blended weights
+    support_plan = build_support_plan(blended_weak, goal_frac, user_frac, int(max_q))
+
+    # Time constraint: estimate time per difficulty and trim to budget
+    def estimate_time_minutes(plan: List[Dict[str, Any]]) -> float:
+        t = 0.0
+        for p in plan:
+            c = p["counts"]
+            t += c.get("easy", 0) * 1.5 + c.get("medium", 0) * 3.0 + c.get("hard", 0) * 5.0
+        return round(t, 1)
+
+    def trim_plan_to_time(plan: List[Dict[str, Any]], budget_min: int) -> List[Dict[str, Any]]:
+        if not budget_min or budget_min <= 0:
+            return plan
+        cur = json.loads(json.dumps(plan))
+        def total(curplan):
+            return estimate_time_minutes(curplan)
+        while total(cur) > budget_min:
+            # greedily reduce hardest counts first
+            reduced = False
+            for p in cur:
+                if p["counts"].get("hard", 0) > 0:
+                    p["counts"]["hard"] -= 1; reduced = True; break
+            if not reduced:
+                for p in cur:
+                    if p["counts"].get("medium", 0) > 0:
+                        p["counts"]["medium"] -= 1; reduced = True; break
+            if not reduced:
+                for p in cur:
+                    if p["counts"].get("easy", 0) > 0:
+                        p["counts"]["easy"] -= 1; reduced = True; break
+            if not reduced:
+                break
+        return cur
+
+    planned_time = estimate_time_minutes(support_plan)
+    if time_budget and time_budget > 0:
+        support_plan = trim_plan_to_time(support_plan, int(time_budget))
+    planned_time_after = estimate_time_minutes(support_plan)
+
     # Build plan and generate questions
-    support_plan = build_support_plan(weak, goal_frac, user_frac, int(max_q))
     gen_questions: List[Dict[str, Any]] = []
     if support_plan:
         gen_prompt = {
@@ -316,6 +447,28 @@ if run:
     if proc_buckets:
         st.subheader("Tổng hợp lỗi thủ tục")
         st.table([{"skillId": b["skillId"], "error_type": b["error_type"], "count": b["count"]} for b in proc_buckets.values()])
+
+    # Goal constraints & aggregates
+    st.subheader("Ràng buộc theo mục tiêu & tổng hợp")
+    colg1, colg2, colg3 = st.columns(3)
+    with colg1:
+        st.metric("Tổng thời gian kế hoạch", f"{planned_time_after} phút")
+    with colg2:
+        st.metric("Ngân sách thời gian", f"{time_budget} phút" if time_budget else "—")
+    with colg3:
+        st.metric("Tần suất sai (kỹ năng hàng đầu)", max(err_freq_by_skill.values()) if err_freq_by_skill else 0)
+
+    if err_freq_by_skill:
+        st.write("Tần suất sai theo kỹ năng:")
+        st.table([{"skillId": k, "wrong_count": v} for k, v in sorted(err_freq_by_skill.items(), key=lambda x: -x[1])])
+    if pbis_by_skill:
+        st.write("Độ phân biệt (PBIS) theo kỹ năng (demo data):")
+        want_skills = {w["skillId"] for w in weak}
+        rows = [{"skillId": k, "pbis": pbis_by_skill.get(k)} for k in sorted(want_skills)]
+        st.table(rows)
+    if avg_points_by_skill:
+        st.write("Trọng số điểm mục (trung bình theo kỹ năng):")
+        st.table([{ "skillId": k, "avg_points": round(v,2)} for k,v in avg_points_by_skill.items()])
 
     st.subheader("Câu hỏi LLM sinh thêm")
     if gen_questions:
