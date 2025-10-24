@@ -2,7 +2,16 @@
 
 This repo ships a Streamlit UI that calls the FastAPI backend to analyze images and generate practice.
 
-### 1) Run the FastAPI backend
+### Option A) Standalone Streamlit (no FastAPI)
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Set `GOOGLE_API_KEY` in your environment (or Streamlit secrets) so the UI can call Gemini directly. This mode runs both "server logic" and UI inside Streamlit.
+
+### Option B) Run the FastAPI backend
 
 ```bash
 pip install -r requirements.txt
@@ -15,20 +24,20 @@ Set your Gemini key for the backend (FastAPI):
 $env:GOOGLE_API_KEY = "<your_api_key>"
 ```
 
-### 2) Run Streamlit locally
+### Run Streamlit as an API client (to FastAPI)
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-In the left sidebar, set `API base URL` to your backend address, e.g. `http://localhost:8080`.
+In older versions, `streamlit_app.py` could call the FastAPI API. The current app defaults to Standalone mode. If you want the client mode, revert to an earlier commit or adapt the file to call `POST /agent/suggest-questions`.
 
-### 3) Deploy on Streamlit Cloud
+### Deploy on Streamlit Cloud
 
 - Push this repo to GitHub.
 - Create a new Streamlit app pointing at `streamlit_app.py`.
-- In Streamlit Cloud, set a secret `API_BASE_URL` to your public backend URL (for example, a Render/Fly/Heroku/Cloud Run deployment of `app.py`).
-- The backend (FastAPI) still needs the `GOOGLE_API_KEY` set on its own host.
+- Set `GOOGLE_API_KEY` in Streamlit Cloud secrets so the app can call Gemini directly.
+- If you want a separate backend, deploy `app.py` elsewhere and adapt the Streamlit app to call it.
 
 ### Notes
 
