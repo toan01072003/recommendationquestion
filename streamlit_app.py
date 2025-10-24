@@ -179,7 +179,37 @@ def analyze_exam_style(model, exam_ref, language: str):
                 "Report: preferred_response_type (FR or MCQ), notation highlights (fractions, algebraic forms), typical points per question, topic_distribution, example_difficulty_markers, and solution_format notes.",
                 "Return strict JSON only."
             ],
-            "output_schema": {"type": "object"},
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "question": {"type": ["string","null"]},
+                                "skill_tag": {"type": ["string","null"]},
+                                "solution_steps": {"type": ["array","null"], "items": {"type": "string"}},
+                                "steps_confidence": {"type": ["number","null"]},
+                                "error_type": {"type": ["string","null"]},
+                                "error_step_index": {"type": ["number","null"]},
+                                "error_explanation": {"type": ["string","null"]},
+                                "student_answer": {"type": ["string","null"]},
+                                "is_marked_correct": {"type": ["boolean","null"]},
+                                "llm_judgement_correct": {"type": ["boolean","null"]},
+                                "points": {"type": ["number","null"]},
+                                "points_earned": {"type": ["number","null"]},
+                                "rationale": {"type": ["string","null"]}
+                            },
+                            "required": ["label"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["items"],
+                "additionalProperties": False
+            },
             "locale": language
         }
         resp = model.generate_content([json.dumps(prompt), exam_ref])
@@ -254,7 +284,29 @@ if run:
                 "If numbering is visible, use it as 'label'.",
                 "Return JSON only; be concise in rationale.",
             ],
-            "output_schema": {"type": "object"},
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "skill_tag": {"type": ["string","null"]},
+                                "solution_steps": {"type": ["array","null"], "items": {"type": "string"}},
+                                "steps_confidence": {"type": ["number","null"]},
+                                "error_type": {"type": ["string","null"]},
+                                "error_step_index": {"type": ["number","null"]}
+                            },
+                            "required": ["label","solution_steps"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["items"],
+                "additionalProperties": False
+            },
             "locale": lang,
         }
         parts = [json.dumps(eval_prompt)]
