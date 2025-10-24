@@ -161,8 +161,8 @@ with st.sidebar:
     time_budget = st.number_input("Thời gian luyện (phút, tuỳ chọn)", min_value=0, max_value=240, value=0)
     st.markdown("GOOGLE_API_KEY phải có trong môi trường (hoặc secrets)")
 
-exam = st.file_uploader("Ảnh đề thi", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=False)
-subm = st.file_uploader("Ảnh bài làm", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=False)
+exams = st.file_uploader("Ảnh đề thi (có thể nhiều trang)", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=True)
+subs = st.file_uploader("Ảnh bài làm (có thể nhiều trang)", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=True)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -175,28 +175,39 @@ run = st.button("Phân tích & Gợi ý luyện tập", type="primary")
 if run:
     model = get_model()
 
-    exam_ref = None
-    sub_ref = None
-    if exam is not None and is_likely_image_bytes(exam.getvalue()):
-        exam_ref = upload_bytes_to_gemini(exam.name, exam.getvalue())
-    if subm is not None and is_likely_image_bytes(subm.getvalue()):
-        sub_ref = upload_bytes_to_gemini(subm.name, subm.getvalue())
+    exam_refs = []
+    sub_refs = []
+    # Upload multiple pages (if any); warn on tiny files
+    for f in (exams or []):
+        data = f.getvalue()
+        if data and len(data) < 20_000:
+            st.warning(f"Ảnh đề '{f.name}' dung lượng thấp ({len(data)}B) – có thể OCR kém.")
+        if is_likely_image_bytes(data):
+            exam_refs.append(upload_bytes_to_gemini(f.name, data))
+    for f in (subs or []):
+        data = f.getvalue()
+        if data and len(data) < 20_000:
+            st.warning(f"Ảnh bài làm '{f.name}' dung lượng thấp ({len(data)}B) – có thể OCR kém.")
+        if is_likely_image_bytes(data):
+            sub_refs.append(upload_bytes_to_gemini(f.name, data))
 
     goal_frac = parse_goal(goal_text)
     user_frac = parse_goal(user_text)
 
     # Evaluate submission vs exam: extract steps, error types, skill tags
     evaluation = {}
-    if exam_ref is not None or sub_ref is not None:
+    if exam_refs or sub_refs:
         eval_prompt = {
             "task": "evaluate_submission_items",
             "instructions": [
                 "Analyze the exam and submission images.",
                 "Use OCR to extract each question text succinctly as 'question'.",
                 "Return per-item judgments with a free-form 'skill_tag' (e.g., FRAC.SIMPLIFY, EQ.SOLVE_1VAR).",
-                "Extract the student's solution_steps (ordered strings).",
+                "Extract the student's solution_steps (ordered strings) by TRANSCRIBING the student's handwriting exactly where possible (do not invent steps).",
+                "For each item, add steps_confidence (0..1) that reflects confidence that steps were read from the student's work rather than inferred.",
                 "If incorrect, classify error_type and locate error_step_index (0-based).",
                 "Use error types: ARITHMETIC_MISTAKE, MISAPPLY_UNIT_MEANING, WRONG_OPERATION, SIGN_ERROR, STEP_SKIPPED, TRANSPOSITION_ERROR, FRACTION_COMMON_DENOMINATOR, ORDER_OF_OPERATIONS.",
+                "If teacher marks/checks/crosses are visible, set is_marked_correct accordingly and increase confidence.",
                 "If numbering is visible, use it as 'label'.",
                 "Return JSON only; be concise in rationale.",
             ],
@@ -204,8 +215,8 @@ if run:
             "locale": lang,
         }
         parts = [json.dumps(eval_prompt)]
-        if exam_ref: parts.append(exam_ref)
-        if sub_ref: parts.append(sub_ref)
+        parts += exam_refs
+        parts += sub_refs
         evresp = model.generate_content(parts)
         try:
             evaluation = json.loads(getattr(evresp, "text", "{}"))
@@ -253,7 +264,7 @@ if run:
         weak = [{"skillId": "GENERAL.REVIEW", "severity": 0.5}]
 
     # Exam style to align difficulty/format
-    exam_style = analyze_exam_style(model, exam_ref, lang) if exam_ref is not None else {}
+    exam_style = analyze_exam_style(model, exam_refs[0], lang) if exam_refs else {}
 
     # Aggregate: pbis by skill from demo data (if available)
     def load_demo_exams() -> List[dict]:
@@ -399,7 +410,7 @@ if run:
             "user_score_fraction": user_frac,
             "aim": "increase" if (goal_frac or 0) > (user_frac or 0) else "consolidate",
             "observed_errors": [
-                {k: it.get(k) for k in ("label","question","skill_tag","student_answer","rationale")}
+                {k: it.get(k) for k in ("label","question","skill_tag","student_answer","rationale","solution_steps","error_type","error_step_index","steps_confidence")}
                 for it in (evaluation.get("items") if isinstance(evaluation, dict) else []) if isinstance(it, dict)
             ],
             "procedural_focus": list(proc_buckets.values()),
@@ -408,8 +419,8 @@ if run:
             "locale": lang,
         }
         parts = [json.dumps(gen_prompt)]
-        if exam_ref: parts.append(exam_ref)
-        if sub_ref: parts.append(sub_ref)
+        parts += exam_refs
+        parts += sub_refs
         gresp = model.generate_content(parts)
         try:
             gen_questions = json.loads(getattr(gresp, "text", "[]"))
@@ -431,6 +442,9 @@ if run:
     if items:
         rows = []
         for it in items:
+            steps = it.get("solution_steps")
+            if isinstance(steps, list):
+                steps = " | ".join([str(s) for s in steps])
             rows.append({
                 "Mục": it.get("label"),
                 "Câu hỏi": it.get("question"),
@@ -438,6 +452,8 @@ if run:
                 "Đúng?": True if it.get("is_marked_correct") or it.get("llm_judgement_correct") else False,
                 "Lỗi": it.get("error_type"),
                 "Bước sai": it.get("error_step_index"),
+                "Steps (trích)": steps,
+                "Conf": it.get("steps_confidence"),
                 "Bài làm": it.get("student_answer"),
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
