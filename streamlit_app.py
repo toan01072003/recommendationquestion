@@ -2,6 +2,7 @@ import os
 import io
 import json
 import tempfile
+import time
 from typing import Optional, Any, Dict, List
 
 import streamlit as st
@@ -54,6 +55,39 @@ def upload_bytes_to_gemini(name: str, data: bytes):
             os.remove(path)
         except Exception:
             pass
+
+
+def wait_until_files_active(file_refs, timeout_sec: int = 90):
+    """Poll Gemini until uploaded files are ACTIVE to avoid 500s when invoking too early."""
+    if not file_refs:
+        return
+    import google.generativeai as genai
+    start = time.time()
+    pending = list(file_refs)
+    while pending and (time.time() - start) < timeout_sec:
+        still = []
+        for f in pending:
+            try:
+                # name may be the resource path
+                fid = getattr(f, "name", None) or getattr(f, "uri", None) or getattr(f, "id", None)
+                if not fid:
+                    continue
+                fresh = genai.get_file(fid)
+                state = getattr(fresh, "state", None)
+                # state may be enum-like or string
+                sname = getattr(state, "name", None) or str(state)
+                if sname and "ACTIVE" in sname:
+                    continue
+                if sname and "FAILED" in sname:
+                    raise RuntimeError(f"Gemini file processing FAILED: {fid}")
+                still.append(f)
+            except Exception:
+                # transient; keep waiting
+                still.append(f)
+        if not still:
+            return
+        time.sleep(1.0)
+        pending = still
 
 
 def parse_goal(goal_text: Optional[str]) -> Optional[float]:
@@ -195,6 +229,12 @@ if run:
     user_frac = parse_goal(user_text)
 
     # Evaluate submission vs exam: extract steps, error types, skill tags
+    # Ensure files are processed by Gemini before generate_content
+    try:
+        wait_until_files_active(exam_refs + sub_refs)
+    except Exception as e:
+        st.warning(f"Tệp ảnh đang xử lý/không sẵn sàng: {e}")
+
     evaluation = {}
     if exam_refs or sub_refs:
         eval_prompt = {
@@ -217,11 +257,19 @@ if run:
         parts = [json.dumps(eval_prompt)]
         parts += exam_refs
         parts += sub_refs
-        evresp = model.generate_content(parts)
-        try:
-            evaluation = json.loads(getattr(evresp, "text", "{}"))
-        except Exception:
-            evaluation = {"raw": getattr(evresp, "text", "{}")}
+        # Retry loop for transient 5xx errors
+        last_err = None
+        for _ in range(3):
+            try:
+                evresp = model.generate_content(parts)
+                evaluation = json.loads(getattr(evresp, "text", "{}"))
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(1.5)
+        if not evaluation:
+            st.error(f"Lỗi khi phân tích ảnh (đánh giá theo câu): {last_err}")
+            evaluation = {}
 
     # Build weak skills and procedural buckets
     weak: List[Dict[str, Any]] = []
@@ -421,13 +469,19 @@ if run:
         parts = [json.dumps(gen_prompt)]
         parts += exam_refs
         parts += sub_refs
-        gresp = model.generate_content(parts)
-        try:
-            gen_questions = json.loads(getattr(gresp, "text", "[]"))
-            if not isinstance(gen_questions, list):
-                gen_questions = []
-        except Exception:
-            gen_questions = []
+        last_err = None
+        for _ in range(3):
+            try:
+                gresp = model.generate_content(parts)
+                gen_questions = json.loads(getattr(gresp, "text", "[]"))
+                if not isinstance(gen_questions, list):
+                    gen_questions = []
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(1.5)
+        if not gen_questions and last_err:
+            st.error(f"Lỗi khi sinh bài luyện: {last_err}")
 
     # Render results
     st.subheader("Tóm tắt")
