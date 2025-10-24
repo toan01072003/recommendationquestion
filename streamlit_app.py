@@ -193,6 +193,8 @@ with st.sidebar:
     lang = st.selectbox("Ngôn ngữ", options=["vi", "en"], index=0)
     max_q = st.number_input("Số câu gợi ý", min_value=1, max_value=20, value=6)
     time_budget = st.number_input("Thời gian luyện (phút, tuỳ chọn)", min_value=0, max_value=240, value=0)
+    min_conf = st.slider("Ngưỡng steps_confidence (lọc bài làm mờ)", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
+    use_fallback = st.checkbox("Dùng OCR fallback cho ảnh bài làm (nếu không trích xuất được)", value=True)
     st.markdown("GOOGLE_API_KEY phải có trong môi trường (hoặc secrets)")
 
 exams = st.file_uploader("Ảnh đề thi (có thể nhiều trang)", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=True)
@@ -236,6 +238,7 @@ if run:
         st.warning(f"Tệp ảnh đang xử lý/không sẵn sàng: {e}")
 
     evaluation = {}
+    raw_eval_text = None
     if exam_refs or sub_refs:
         eval_prompt = {
             "task": "evaluate_submission_items",
@@ -262,7 +265,8 @@ if run:
         for _ in range(3):
             try:
                 evresp = model.generate_content(parts)
-                evaluation = json.loads(getattr(evresp, "text", "{}"))
+                raw_eval_text = getattr(evresp, "text", "{}")
+                evaluation = json.loads(raw_eval_text or "{}")
                 break
             except Exception as e:
                 last_err = e
@@ -270,6 +274,50 @@ if run:
         if not evaluation:
             st.error(f"Lỗi khi phân tích ảnh (đánh giá theo câu): {last_err}")
             evaluation = {}
+
+    # Fallback extraction focused on submission images only (if no usable items)
+    def submission_fallback_extract() -> dict:
+        if not sub_refs:
+            return {}
+        prompt = {
+            "task": "submission_only_steps",
+            "instructions": [
+                "Transcribe the student's work from the submission images.",
+                "Group lines into problems by visible labels (a,b,1,2,...) if any; otherwise segment by spacing.",
+                "For each problem, output: label, skill_tag (best guess), solution_steps (ordered strings), steps_confidence (0..1), error_type (if incorrect), error_step_index (0-based).",
+                "Return strict JSON only.",
+            ],
+            "output_schema": {"type": "object"},
+            "locale": lang,
+        }
+        parts = [json.dumps(prompt)] + sub_refs
+        last_err2 = None
+        for _ in range(2):
+            try:
+                resp = model.generate_content(parts)
+                txt = getattr(resp, "text", "{}")
+                return json.loads(txt or "{}")
+            except Exception as e:
+                last_err2 = e
+                time.sleep(1.2)
+        st.warning(f"Fallback OCR không thành công: {last_err2}")
+        return {}
+
+    # If no items or all items have very low confidence, try fallback
+    def items_conf(items):
+        vals = []
+        for it in (items or []):
+            c = it.get("steps_confidence")
+            if isinstance(c, (int, float)):
+                vals.append(float(c))
+        return vals
+
+    items0 = (evaluation.get("items") if isinstance(evaluation, dict) else None) or []
+    need_fallback = (not items0) or all((v is None or v < min_conf) for v in items_conf(items0))
+    if use_fallback and need_fallback:
+        alt = submission_fallback_extract()
+        if isinstance(alt, dict) and isinstance(alt.get("items"), list) and alt["items"]:
+            evaluation = alt
 
     # Build weak skills and procedural buckets
     weak: List[Dict[str, Any]] = []
@@ -459,7 +507,8 @@ if run:
             "aim": "increase" if (goal_frac or 0) > (user_frac or 0) else "consolidate",
             "observed_errors": [
                 {k: it.get(k) for k in ("label","question","skill_tag","student_answer","rationale","solution_steps","error_type","error_step_index","steps_confidence")}
-                for it in (evaluation.get("items") if isinstance(evaluation, dict) else []) if isinstance(it, dict)
+                for it in (evaluation.get("items") if isinstance(evaluation, dict) else [])
+                if isinstance(it, dict) and (it.get("steps_confidence") is None or it.get("steps_confidence", 0) >= min_conf)
             ],
             "procedural_focus": list(proc_buckets.values()),
             "exam_style": exam_style,
@@ -558,5 +607,8 @@ if run:
 
     with st.expander("JSON đánh giá"):
         st.code(json.dumps(evaluation, ensure_ascii=False, indent=2))
+        if raw_eval_text:
+            st.write("Raw response:")
+            st.code(raw_eval_text)
     with st.expander("JSON câu hỏi sinh"):
         st.code(json.dumps(gen_questions, ensure_ascii=False, indent=2))
