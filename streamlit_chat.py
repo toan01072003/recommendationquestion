@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
+import requests
 
 
 # Load .env for GOOGLE_API_KEY when running locally
@@ -88,6 +89,27 @@ def wait_until_files_active(file_refs, timeout_sec: int = 90):
             return
         time.sleep(1.0)
         pending = still
+
+
+# --------------- DeepSeek OCR via backend ---------------
+def call_deepseek_ocr_api(api_base: str, img_name: str, img_bytes: bytes, language: str = "vi") -> Optional[str]:
+    """Call FastAPI endpoint /ocr/deepseek-extract and return joined text or None.
+    Expects FastAPI app from app.py running at api_base (e.g., http://localhost:8000).
+    """
+    if not img_bytes:
+        return None
+    url = (api_base or "http://localhost:8000").rstrip("/") + "/ocr/deepseek-extract"
+    files = {"submission_image": (img_name or "submission.png", img_bytes, "application/octet-stream")}
+    data = {"language": language or "vi"}
+    try:
+        resp = requests.post(url, files=files, data=data, timeout=60)
+        resp.raise_for_status()
+        js = resp.json()
+        if isinstance(js, dict) and isinstance(js.get("lines"), list):
+            return "\n".join(str(x) for x in js["lines"])
+    except Exception:
+        return None
+    return None
 
 
 # -------------------- Scoring helpers --------------------
@@ -261,6 +283,22 @@ def run_pipeline(user_prompt: str):
     except Exception as e:
         pass
 
+    # Optional: DeepSeek OCR via backend for submission images
+    api_base = os.environ.get("EDUREC_API_BASE", "http://localhost:8000")
+    ds_ocr_text = None
+    try:
+        texts = []
+        for f in (subs or []):
+            data = f.getvalue()
+            if is_likely_image_bytes(data):
+                t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
+                if t:
+                    texts.append(t)
+        if texts:
+            ds_ocr_text = "\n\n---\n\n".join(texts)
+    except Exception:
+        ds_ocr_text = None
+
     # Evaluate: parse exam into Bài/ý labels and map answers
     evaluation = {}
     eval_prompt = {
@@ -306,6 +344,14 @@ def run_pipeline(user_prompt: str):
         },
         "locale": lang,
     }
+    # Provide OCR hint to the LLM if available
+    if ds_ocr_text:
+        try:
+            eval_prompt["ocr_hint"] = ds_ocr_text
+            if isinstance(eval_prompt.get("instructions"), list):
+                eval_prompt["instructions"].append("If ocr_hint is provided, use it to improve mapping and cleaner text extraction.")
+        except Exception:
+            pass
     parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + sub_refs
     try:
         evresp = model.generate_content(parts_ev)
@@ -415,6 +461,7 @@ def run_pipeline(user_prompt: str):
         "gradebook": gradebook,
         "hints": hint_questions,
         "practice": gen_questions,
+        "ocr_text": ds_ocr_text,
     }
 
 
@@ -459,4 +506,9 @@ if user := st.chat_input("Nhập tin nhắn để bắt đầu phân tích…"):
                     st.caption("Sơ đồ: " + str(q.get("diagram_description")))
         with st.expander("JSON chi tiết (evaluation)"):
             st.code(json.dumps(result.get("evaluation"), ensure_ascii=False, indent=2))
+    # Also show OCR when present, near the end of the assistant block
+    # (Placed here to avoid disrupting the flow above.)
+    if result.get("ocr_text"):
+        with st.expander("DeepSeek OCR (submission)"):
+            st.code(result.get("ocr_text"))
     st.session_state.messages.append({"role": "assistant", "content": result.get("assistant")})

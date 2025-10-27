@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from dotenv import load_dotenv
 import streamlit.components.v1 as components
+import requests
 
 
 # Load API key
@@ -86,6 +87,27 @@ def wait_until_files_active(file_refs, timeout_sec: int = 90):
             return
         time.sleep(1.0)
         pending = still
+
+
+# --------------- DeepSeek OCR via backend ---------------
+def call_deepseek_ocr_api(api_base: str, img_name: str, img_bytes: bytes, language: str = "vi") -> Optional[str]:
+    """Call FastAPI endpoint /ocr/deepseek-extract and return joined text or None.
+    Expects FastAPI app from app.py running at api_base (e.g., http://localhost:8000).
+    """
+    if not img_bytes:
+        return None
+    url = (api_base or "http://localhost:8000").rstrip("/") + "/ocr/deepseek-extract"
+    files = {"submission_image": (img_name or "submission.png", img_bytes, "application/octet-stream")}
+    data = {"language": language or "vi"}
+    try:
+        resp = requests.post(url, files=files, data=data, timeout=60)
+        resp.raise_for_status()
+        js = resp.json()
+        if isinstance(js, dict) and isinstance(js.get("lines"), list):
+            return "\n".join(str(x) for x in js["lines"])
+    except Exception:
+        return None
+    return None
 
 
 # --------------- Scoring helpers ---------------
@@ -224,6 +246,22 @@ if st.button("Phân tích & Gợi ý"):
     except Exception:
         pass
 
+    # Optional: DeepSeek OCR via backend for submission images
+    api_base = os.environ.get("EDUREC_API_BASE", "http://localhost:8000")
+    ds_ocr_text = None
+    try:
+        texts = []
+        for f in (subs or []):
+            data = f.getvalue()
+            if is_likely_image_bytes(data):
+                t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
+                if t:
+                    texts.append(t)
+        if texts:
+            ds_ocr_text = "\n\n---\n\n".join(texts)
+    except Exception:
+        ds_ocr_text = None
+
     # Evaluate: parse exam into Bài/ý and map answers
     evaluation: Dict[str, Any] = {}
     eval_prompt = {
@@ -247,6 +285,14 @@ if st.button("Phân tích & Gợi ý"):
         },
         "locale": lang,
     }
+    # Provide OCR hint to the LLM if available
+    if 'ds_ocr_text' in locals() and ds_ocr_text:
+        try:
+            eval_prompt["ocr_hint"] = ds_ocr_text
+            if isinstance(eval_prompt.get("instructions"), list):
+                eval_prompt["instructions"].append("If ocr_hint is provided, use it to improve mapping and cleaner text extraction.")
+        except Exception:
+            pass
     parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + sub_refs
     try:
         evresp = model.generate_content(parts_ev)
@@ -386,6 +432,9 @@ if st.button("Phân tích & Gợi ý"):
     else:
         st.info("Chưa sinh được câu hỏi. Hãy thử tăng số câu hoặc tải ảnh rõ hơn.")
 
+    if 'ds_ocr_text' in locals() and ds_ocr_text:
+        with st.expander("DeepSeek OCR (submission)"):
+            st.code(ds_ocr_text)
+
     with st.expander("JSON evaluation"):
         st.code(json.dumps(evaluation, ensure_ascii=False, indent=2))
-
