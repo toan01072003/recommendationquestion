@@ -1,0 +1,86 @@
+[
+  {
+    "itemId": "FRAC_001",
+    "skillIds": [
+      "FRAC.SIMPLIFY"
+    ],
+    "maxPoints": 1,
+    "tags": [
+      "MCQ"
+    ],
+    "difficulty_b": -0.3,
+    "pbis": 0.25
+  },
+  {
+    "itemId": "FRAC_002",
+    "skillIds": [
+      "FRAC.SIMPLIFY"
+    ],
+    "maxPoints": 1,
+    "tags": [
+      "FR"
+    ],
+    "difficulty_b": 0.2,
+    "pbis": 0.3
+  },
+  {
+    "itemId": "FRAC_012",
+    "skillIds": [
+      "FRAC.SIMPLIFY"
+    ],
+    "maxPoints": 1,
+    "tags": [
+      "MCQ"
+    ],
+    "difficulty_b": 0.4,
+    "pbis": 0.28
+  },
+  {
+    "itemId": "EQ_041",
+    "skillIds": [
+      "EQ.SOLVE_1VAR"
+    ],
+    "maxPoints": 2,
+    "tags": [
+      "FR"
+    ],
+    "difficulty_b": -0.2,
+    "pbis": 0.32
+  },
+  {
+    "itemId": "EQ_045",
+    "skillIds": [
+      "EQ.SOLVE_1VAR"
+    ],
+    "maxPoints": 2,
+    "tags": [
+      "MCQ"
+    ],
+    "difficulty_b": 0.3,
+    "pbis": 0.35
+  },
+  {
+    "itemId": "WORD_010",
+    "skillIds": [
+      "WORDPROB.MULTI_STEP"
+    ],
+    "maxPoints": 2,
+    "tags": [
+      "FR"
+    ],
+    "difficulty_b": 0.0,
+    "pbis": 0.22
+  },
+  {
+    "itemId": "WORD_011",
+    "skillIds": [
+      "WORDPROB.MULTI_STEP"
+    ],
+    "maxPoints": 2,
+    "tags": [
+      "FR"
+    ],
+    "difficulty_b": 0.5,
+    "pbis": 0.27
+  }
+]

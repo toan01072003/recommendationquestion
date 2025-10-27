@@ -1,0 +1,124 @@
+{
+  "examId": "ALG7_quiz2_2025_10",
+  "examMeta": {
+    "grade": 7,
+    "topic": "Algebra",
+    "date": "2025-10-05"
+  },
+  "items": [
+    {
+      "itemId": "Q1",
+      "skillIds": [
+        "FRAC.SIMPLIFY"
+      ],
+      "maxPoints": 1
+    },
+    {
+      "itemId": "Q2",
+      "skillIds": [
+        "EQ.SOLVE_1VAR"
+      ],
+      "maxPoints": 2
+    },
+    {
+      "itemId": "Q3",
+      "skillIds": [
+        "EQ.SOLVE_1VAR"
+      ],
+      "maxPoints": 2
+    },
+    {
+      "itemId": "Q4",
+      "skillIds": [
+        "WORDPROB.MULTI_STEP"
+      ],
+      "maxPoints": 2
+    }
+  ],
+  "responses": [
+    {
+      "studentId": "S01",
+      "itemId": "Q1",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 62
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q2",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 88
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q3",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 92
+    },
+    {
+      "studentId": "S01",
+      "itemId": "Q4",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 140
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q1",
+      "isCorrect": true,
+      "score": 1.0,
+      "timeSpentSec": 35
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q2",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 61
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q3",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 69
+    },
+    {
+      "studentId": "S02",
+      "itemId": "Q4",
+      "isCorrect": true,
+      "score": 2.0,
+      "timeSpentSec": 80
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q1",
+      "isCorrect": true,
+      "score": 1.0,
+      "timeSpentSec": 49
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q2",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 130
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q3",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 135
+    },
+    {
+      "studentId": "S03",
+      "itemId": "Q4",
+      "isCorrect": false,
+      "score": 0.0,
+      "timeSpentSec": 125
+    }
+  ]
+}
