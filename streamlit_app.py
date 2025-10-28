@@ -136,6 +136,18 @@ def call_evaluate_with_key_api(api_base: str,
         return None
 
 
+# --------------- JSON parsing helpers ---------------
+def safe_json_loads(text: str, default: Any):
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            fixed = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", text)
+            return json.loads(fixed)
+        except Exception:
+            return default
+
+
 # --------------- Anchor linking helpers ---------------
 def _strip_accents_lower(s: str) -> str:
     try:
@@ -534,9 +546,10 @@ if analyze_clicked:
         parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + key_refs + sub_refs
         try:
             evresp = model.generate_content(parts_ev)
-            evaluation = json.loads(getattr(evresp, "text", "{}"))
+            raw = getattr(evresp, "text", "{}")
+            evaluation = safe_json_loads(raw, {})
             if not isinstance(evaluation, dict):
-                evaluation = {"raw": evaluation}
+                evaluation = {"raw": raw}
         except Exception as e:
             st.error(f"Lỗi đánh giá: {e}")
             evaluation = {}
@@ -910,7 +923,8 @@ if suggest_clicked:
             parts = [json.dumps(gen_prompt)]
             try:
                 gresp = model.generate_content(parts)
-                gen_questions = json.loads(getattr(gresp, "text", "[]"))
+                raw = getattr(gresp, "text", "[]")
+                gen_questions = safe_json_loads(raw, [])
                 if not isinstance(gen_questions, list):
                     gen_questions = []
             except Exception as e:
@@ -938,7 +952,8 @@ if suggest_clicked:
             }
             try:
                 hresp = model.generate_content([json.dumps(hints_prompt)])
-                hint_questions = json.loads(getattr(hresp, "text", "[]"))
+                raw = getattr(hresp, "text", "[]")
+                hint_questions = safe_json_loads(raw, [])
                 if not isinstance(hint_questions, list):
                     hint_questions = []
             except Exception:

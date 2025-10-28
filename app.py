@@ -531,7 +531,11 @@ async def evaluate_with_key(
     try:
         evaluation = json.loads(text)
     except Exception:
-        evaluation = {"raw": text}
+        try:
+            fixed = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", text)
+            evaluation = json.loads(fixed)
+        except Exception:
+            evaluation = {"raw": text}
 
     # Post-process: numeric rule-check and cascade step rule
     if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list):
