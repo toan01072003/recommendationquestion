@@ -551,6 +551,41 @@ if st.button("Phân tích & Gợi ý"):
     else:
         st.info("Chưa có mục nào được trích.")
 
+    # Show per-item extracted answer content
+    st.subheader("Phần bài làm đã trích theo từng mục")
+    items = evaluation.get("items") if isinstance(evaluation, dict) else None
+    if isinstance(items, list) and items:
+        rows = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            lbl = it.get("label")
+            ans = it.get("student_answer") or ""
+            try:
+                conf = float(it.get("mapping_confidence")) if it.get("mapping_confidence") is not None else None
+            except Exception:
+                conf = None
+            ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
+            rows.append({
+                "Mục": lbl,
+                "Đúng?": "✓" if ok else ("✗" if ok is False else "?"),
+                "Tin cậy": (f"{round(conf*100):d}%" if isinstance(conf, (int, float)) else "—"),
+                "Trích xuất": (ans[:180] + ("…" if len(ans) > 180 else ""))
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        with st.expander("Chi tiết trích xuất (đầy đủ)"):
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                lbl = it.get("label") or "—"
+                ans = it.get("student_answer") or ""
+                if not ans:
+                    continue
+                st.markdown(f"`{lbl}`")
+                st.code(ans)
+    else:
+        st.info("Chưa có dữ liệu trích xuất từ bài làm.")
+
     st.subheader("Gợi ý theo từng mục sai")
     if hint_questions:
         for h in hint_questions:
