@@ -309,36 +309,60 @@ with st.sidebar:
     user_text = st.text_input("Điểm của bạn (ví dụ 6/10)", value="")
     max_q = st.number_input("Số câu luyện gợi ý", min_value=1, max_value=20, value=6)
     exams = st.file_uploader("Ảnh đề (1 hoặc nhiều trang)", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=True)
+    keys = st.file_uploader("Ảnh đáp án/chấm điểm (1 hoặc nhiều trang)", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=True)
     subs = st.file_uploader("Ảnh bài làm (1 hoặc nhiều trang)", type=["png","jpg","jpeg","webp","gif"], accept_multiple_files=True)
 
 
-if st.button("Phân tích & Gợi ý"):
+if 'evaluation' not in st.session_state:
+    st.session_state.evaluation = None
+    st.session_state.gradebook = None
+    st.session_state.exam_anchors = []
+    st.session_state.sub_anchors = []
+    st.session_state.key_anchors = []
+    st.session_state.ds_ocr_text = None
+    st.session_state.ans_ocr_text = None
+    st.session_state.gen_questions = []
+    st.session_state.hint_questions = []
+
+colA, colB = st.columns(2)
+with colA:
+    analyze_clicked = st.button("Phân tích & Chấm điểm")
+with colB:
+    suggest_clicked = st.button("Gợi ý luyện tập")
+
+if analyze_clicked:
     model = get_model()
 
     # Upload files
     exam_refs = []
+    key_refs = []
     sub_refs = []
     for f in (exams or []):
         data = f.getvalue()
         if is_likely_image_bytes(data):
             exam_refs.append(upload_bytes_to_gemini(f.name, data))
+    for f in (keys or []):
+        data = f.getvalue()
+        if is_likely_image_bytes(data):
+            key_refs.append(upload_bytes_to_gemini(f.name, data))
     for f in (subs or []):
         data = f.getvalue()
         if is_likely_image_bytes(data):
             sub_refs.append(upload_bytes_to_gemini(f.name, data))
 
-    if not exam_refs and not sub_refs:
-        st.warning("Cần ít nhất 1 ảnh đề hoặc bài làm.")
+    if not exam_refs and not sub_refs and not key_refs:
+        st.warning("Cần ít nhất 1 ảnh đề, đáp án hoặc bài làm.")
         st.stop()
 
     try:
-        wait_until_files_active(exam_refs + sub_refs)
+        wait_until_files_active(exam_refs + key_refs + sub_refs)
     except Exception:
         pass
 
     # Optional: DeepSeek OCR via backend for submission images
     api_base = os.environ.get("EDUREC_API_BASE", "http://localhost:8000")
     ds_ocr_text = None
+    ans_ocr_text = None
     exam_ocr_text = None
     try:
         texts = []
@@ -350,6 +374,16 @@ if st.button("Phân tích & Gợi ý"):
                     texts.append(t)
         if texts:
             ds_ocr_text = "\n\n---\n\n".join(texts)
+        # OCR answer key as well
+        atexts = []
+        for f in (keys or []):
+            data = f.getvalue()
+            if is_likely_image_bytes(data):
+                t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
+                if t:
+                    atexts.append(t)
+        if atexts:
+            ans_ocr_text = "\n\n---\n\n".join(atexts)
         # OCR exam as well (for Anchor IDs on exam side)
         etexts = []
         for f in (exams or []):
@@ -362,6 +396,7 @@ if st.button("Phân tích & Gợi ý"):
             exam_ocr_text = "\n\n---\n\n".join(etexts)
     except Exception:
         ds_ocr_text = None
+        ans_ocr_text = None
         exam_ocr_text = None
 
     # Evaluate: parse exam into Bài/ý and map answers
@@ -369,6 +404,7 @@ if st.button("Phân tích & Gợi ý"):
     # Build anchors from OCR (if available)
     exam_anchors = build_anchors_from_text(exam_ocr_text) if exam_ocr_text else []
     sub_anchors = build_anchors_from_text(ds_ocr_text) if ds_ocr_text else []
+    key_anchors = build_anchors_from_text(ans_ocr_text) if ans_ocr_text else []
 
     eval_prompt = {
         "task": "evaluate_submission_items",
@@ -377,9 +413,11 @@ if st.button("Phân tích & Gợi ý"):
             "Normalize labels as 'B1.a', 'B1.b', ... (ASCII only).",
             "Extract short 'question' texts for each leaf.",
             "Map student's answers from the submission to these leaf labels; set mapping_confidence.",
+            "Use the provided answer key (answer_key_ocr and anchors_hint.answer_key) to determine correctness and partial credit where applicable. Prefer explicit marking in the key; otherwise infer.",
             "Judge correctness; if no printed points, default 1 point per leaf.",
             "Add a free-form 'skill_tag' for the math topic (e.g., GEOM.SIMILARITY, GEOM.ALTITUDE, FRAC.SIMPLIFY, EQ.SOLVE_1VAR).",
             "If anchors_hint is provided, prefer mapping by exact anchor_id equality (e.g., anchor 'B1.a' -> label 'B1.a'); when used, set mapping_confidence >= 0.9 and copy the corresponding anchor text into student_answer.",
+            "Include 'correct_answer' when determinable from the answer key; include a brief 'answer_rationale' if helpful.",
             "Return JSON only.",
         ],
         "output_schema": {
@@ -400,13 +438,19 @@ if st.button("Phân tích & Gợi ý"):
                 eval_prompt["instructions"].append("If ocr_hint is provided, use it to improve mapping and cleaner text extraction.")
         except Exception:
             pass
+    # Provide answer key OCR text too
+    if ans_ocr_text:
+        try:
+            eval_prompt["answer_key_ocr"] = ans_ocr_text
+        except Exception:
+            pass
     # Provide anchors hint when available
     try:
-        if exam_anchors or sub_anchors:
-            eval_prompt["anchors_hint"] = {"exam": exam_anchors, "submission": sub_anchors}
+        if exam_anchors or sub_anchors or key_anchors:
+            eval_prompt["anchors_hint"] = {"exam": exam_anchors, "answer_key": key_anchors, "submission": sub_anchors}
     except Exception:
         pass
-    parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + sub_refs
+    parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + key_refs + sub_refs
     try:
         evresp = model.generate_content(parts_ev)
         evaluation = json.loads(getattr(evresp, "text", "{}"))
@@ -436,110 +480,52 @@ if st.button("Phân tích & Gợi ý"):
                     it["mapping_confidence"] = max(0.9, mc)
                     if not it.get("rationale"):
                         it["rationale"] = "Mapped via Anchor ID"
+        # Fill correct_answer from answer key anchors when missing
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list) and key_anchors:
+            key_map = {a.get("anchor_id"): a.get("text") for a in key_anchors if a.get("anchor_id")}
+            for it in evaluation["items"]:
+                if not isinstance(it, dict):
+                    continue
+                lbl = it.get("label")
+                if not lbl:
+                    continue
+                if (not it.get("correct_answer")) and lbl in key_map:
+                    it["correct_answer"] = key_map[lbl]
     except Exception:
         pass
 
-    # Gradebook & weak skills
-    gradebook = derive_gradebook(evaluation)
-    wrong_count: Dict[str, int] = {}
-    for it in evaluation.get("items", []) if isinstance(evaluation, dict) else []:
-        ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
-        if ok:
-            continue
-        sid = it.get("skill_tag") or it.get("skillId")
-        if not sid:
-            continue
-        wrong_count[sid] = wrong_count.get(sid, 0) + 1
-    weak = []
-    total_wrong = sum(wrong_count.values())
-    if total_wrong > 0:
-        for sid, cnt in wrong_count.items():
-            weak.append({"skillId": sid, "severity": round(cnt/total_wrong, 2)})
-    if not weak:
-        weak = [{"skillId": "GENERAL.REVIEW", "severity": 0.5}]
+    # Persist results for the suggestion step
+    st.session_state.evaluation = evaluation
+    st.session_state.gradebook = derive_gradebook(evaluation)
+    st.session_state.exam_anchors = exam_anchors
+    st.session_state.sub_anchors = sub_anchors
+    st.session_state.key_anchors = key_anchors
+    st.session_state.ds_ocr_text = ds_ocr_text
+    st.session_state.ans_ocr_text = ans_ocr_text
+    st.session_state.exam_ocr_text = exam_ocr_text
 
-    goal_frac = parse_goal(goal_text)
-    user_frac = parse_goal(user_text)
-    support_plan = build_support_plan(weak, goal_frac, user_frac, int(max_q))
+# -------- Render results if available --------
+evaluation = st.session_state.get('evaluation')
+gradebook = st.session_state.get('gradebook') or {"entries": [], "totals": {"earned": 0, "total": 0}}
+exam_anchors = st.session_state.get('exam_anchors', [])
+sub_anchors = st.session_state.get('sub_anchors', [])
+key_anchors = st.session_state.get('key_anchors', [])
+ds_ocr_text = st.session_state.get('ds_ocr_text')
+ans_ocr_text = st.session_state.get('ans_ocr_text')
+exam_ocr_text = st.session_state.get('exam_ocr_text')
 
-    # Geometry booster: if exam context suggests geometry, instruct generator accordingly
-    is_geom = detect_geometry_context(evaluation)
-    geom_templates = [
-        "a) Chứng minh hai tam giác đồng dạng (ví dụ ΔAHB ~ ΔCAB) bằng góc bằng nhau.",
-        "b) Suy ra hệ thức độ dài từ tam giác vuông có đường cao: AH^2 = AM.AB; AB^2 = BH.BC; AC^2 = CH.BC; BH.CH = AH^2.",
-        "c) Cho số liệu (vd AB=6cm, BC=10cm), tính AC, AH, BH, CH.",
-        "d) Kẻ đường vuông góc/phân giác qua A để tạo giao điểm và chứng minh các hệ thức tỉ lệ đoạn thẳng.",
-    ]
-
-    gen_questions: List[Dict[str, Any]] = []
-    if support_plan:
-        gen_prompt = {
-            "task": "generate_support_practice",
-            "instructions": [
-                "Generate short, clear math questions suited for middle school.",
-                "Follow the plan: for each skillId, produce the requested counts per difficulty (easy/medium/hard).",
-                "Calibrate difficulty relative to the exam style; prefer geometry-style problems if topic_hint=geometry.",
-                "For geometry, DO NOT draw diagrams; write text-only problems similar to school exams with subparts a), b), c).",
-                "Use right-triangle altitude and similarity facts when appropriate.",
-                "Provide final answers and a concise solution_outline; avoid LaTeX and images.",
-                "Return JSON array only.",
-            ],
-            "plan": support_plan,
-            "topic_hint": "geometry" if is_geom else None,
-            "geometry_templates": geom_templates if is_geom else None,
-            "output_schema": {"type": "array"},
-            "locale": lang,
-        }
-        parts = [json.dumps(gen_prompt)] + exam_refs + sub_refs
-        try:
-            gresp = model.generate_content(parts)
-            gen_questions = json.loads(getattr(gresp, "text", "[]"))
-            if not isinstance(gen_questions, list):
-                gen_questions = []
-        except Exception as e:
-            st.warning(f"Lỗi sinh câu hỏi: {e}")
-            gen_questions = []
-
-    # Hints per wrong item
-    hint_questions: List[Dict[str, Any]] = []
-    wrong_items = []
-    if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list):
-        for it in evaluation["items"]:
-            ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
-            if not ok:
-                wrong_items.append({k: it.get(k) for k in ("label","question","skill_tag","rationale")})
-    if wrong_items:
-        hints_prompt = {
-            "task": "generate_guiding_questions",
-            "instructions": [
-                "For each wrong item, write 1-2 short guiding questions (Socratic hints) that nudge the student to the next step, without giving the final answer.",
-                "Keep language concise for grade 8 Vietnamese math; avoid LaTeX.",
-                "Refer to items by their labels like 'B1.a'.",
-                "Return JSON array only.",
-            ],
-            "wrong_items": wrong_items,
-            "max_hints": min(8, max(3, len(wrong_items))),
-            "goal_fraction": goal_frac,
-            "output_schema": {"type": "array"},
-            "locale": lang,
-        }
-        try:
-            hresp = model.generate_content([json.dumps(hints_prompt)])
-            hint_questions = json.loads(getattr(hresp, "text", "[]"))
-            if not isinstance(hint_questions, list):
-                hint_questions = []
-        except Exception:
-            hint_questions = []
-
-    # -------- Render --------
+if isinstance(evaluation, dict) and evaluation:
+    # Overview
     st.subheader("Tổng quan")
     gf = parse_goal(goal_text)
     uf = parse_goal(user_text)
+    is_geom = detect_geometry_context(evaluation)
     ca, cb, cc = st.columns(3)
     with ca: st.metric("Mục tiêu", f"{round(gf*100):d}%" if isinstance(gf,(int,float)) else "?")
     with cb: st.metric("Điểm của bạn", f"{round(uf*100):d}%" if isinstance(uf,(int,float)) else "?")
     with cc: st.metric("Chủ đề", "Hình học" if is_geom else "Tổng hợp")
 
+    # Gradebook table
     st.subheader("Bảng điểm theo mục")
     ent = gradebook.get("entries", [])
     if ent:
@@ -551,41 +537,217 @@ if st.button("Phân tích & Gợi ý"):
     else:
         st.info("Chưa có mục nào được trích.")
 
-    # Show per-item extracted answer content
-    st.subheader("Phần bài làm đã trích theo từng mục")
+    # Extracted per-item content (exam vs student vs answer key)
+    st.subheader("Bảng trích xuất: Đề – Bài làm – Đáp án")
     items = evaluation.get("items") if isinstance(evaluation, dict) else None
+    key_map = {a.get("anchor_id"): a.get("text") for a in (key_anchors or []) if a.get("anchor_id")}
+    exam_map = {a.get("anchor_id"): a.get("text") for a in (exam_anchors or []) if a.get("anchor_id")}
     if isinstance(items, list) and items:
         rows = []
         for it in items:
             if not isinstance(it, dict):
                 continue
             lbl = it.get("label")
+            ques = (it.get("question") or (exam_map.get(lbl) if lbl else ""))
             ans = it.get("student_answer") or ""
+            gold = it.get("correct_answer") or (key_map.get(lbl) if lbl else "")
             try:
                 conf = float(it.get("mapping_confidence")) if it.get("mapping_confidence") is not None else None
             except Exception:
                 conf = None
             ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
+            pts = it.get("points")
+            pe = it.get("points_earned")
             rows.append({
                 "Mục": lbl,
                 "Đúng?": "✓" if ok else ("✗" if ok is False else "?"),
                 "Tin cậy": (f"{round(conf*100):d}%" if isinstance(conf, (int, float)) else "—"),
-                "Trích xuất": (ans[:180] + ("…" if len(ans) > 180 else ""))
+                "Điểm": (f"{pe}/{pts}" if (pe is not None or pts is not None) else "—"),
+                "Đề bài": (str(ques)[:90] + ("…" if len(str(ques)) > 90 else "")),
+                "Bài làm": (ans[:90] + ("…" if len(ans) > 90 else "")),
+                "Đáp án chuẩn": (gold[:90] + ("…" if len(gold) > 90 else ""))
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
-        with st.expander("Chi tiết trích xuất (đầy đủ)"):
+        with st.expander("Chi tiết (đầy đủ) theo từng mục"):
             for it in items:
                 if not isinstance(it, dict):
                     continue
                 lbl = it.get("label") or "—"
+                ques = (it.get("question") or (exam_map.get(lbl) if lbl else "")) or ""
                 ans = it.get("student_answer") or ""
-                if not ans:
-                    continue
-                st.markdown(f"`{lbl}`")
-                st.code(ans)
+                gold = it.get("correct_answer") or (key_map.get(lbl) if lbl else "")
+                ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
+                st.markdown(f"### `{lbl}` — {'Đúng' if ok else 'Sai' if ok is False else '?'}")
+                if ques:
+                    st.caption("Đề bài:")
+                    st.code(ques)
+                if ans:
+                    st.caption("Bài làm:")
+                    st.code(ans)
+                if gold:
+                    st.caption("Đáp án/Chấm điểm:")
+                    st.code(gold)
+                if it.get("rationale"):
+                    st.caption("Nhận xét của hệ thống:")
+                    st.write(it.get("rationale"))
+                if it.get("rubric"):
+                    st.caption("Rubric:")
+                    try:
+                        st.json(it.get("rubric"))
+                    except Exception:
+                        st.write(it.get("rubric"))
     else:
         st.info("Chưa có dữ liệu trích xuất từ bài làm.")
 
+    # Error comments input before suggestion
+    st.subheader("Nhận xét lỗi sai (tự nhập)")
+    st.text_area(
+        "Viết theo dạng: B1.a: nhầm công thức; B2.c: thiếu điều kiện…",
+        key="error_comments",
+        height=120,
+    )
+
+    # Debug: OCR and anchors
+    if ds_ocr_text:
+        with st.expander("DeepSeek OCR (submission)"):
+            st.code(ds_ocr_text)
+    if exam_ocr_text:
+        with st.expander("DeepSeek OCR (exam)"):
+            st.code(exam_ocr_text)
+    if ans_ocr_text:
+        with st.expander("DeepSeek OCR (answer key)"):
+            st.code(ans_ocr_text)
+    if (exam_anchors or sub_anchors or key_anchors):
+        with st.expander("Anchors (OCR-based)"):
+            if exam_anchors:
+                st.markdown("- Exam anchors:")
+                for a in exam_anchors[:20]:
+                    st.markdown(f"  - `{a.get('anchor_id')}`: {a.get('text')[:120]}...")
+            if key_anchors:
+                st.markdown("- Answer key anchors:")
+                for a in key_anchors[:20]:
+                    st.markdown(f"  - `{a.get('anchor_id')}`: {a.get('text')[:120]}...")
+            if sub_anchors:
+                st.markdown("- Submission anchors:")
+                for a in sub_anchors[:20]:
+                    st.markdown(f"  - `{a.get('anchor_id')}`: {a.get('text')[:120]}...")
+
+    with st.expander("JSON evaluation"):
+        st.code(json.dumps(evaluation, ensure_ascii=False, indent=2))
+
+# -------- Suggestion step --------
+if suggest_clicked:
+    if not isinstance(st.session_state.get('evaluation'), dict):
+        st.warning("Chưa có kết quả phân tích. Hãy bấm 'Phân tích & Chấm điểm' trước.")
+    else:
+        model = get_model()
+        evaluation = st.session_state.get('evaluation')
+        # Build weak skills
+        wrong_count: Dict[str, int] = {}
+        for it in evaluation.get("items", []) if isinstance(evaluation, dict) else []:
+            ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
+            if ok:
+                continue
+            sid = it.get("skill_tag") or it.get("skillId")
+            if not sid:
+                continue
+            wrong_count[sid] = wrong_count.get(sid, 0) + 1
+        weak = []
+        total_wrong = sum(wrong_count.values())
+        if total_wrong > 0:
+            for sid, cnt in wrong_count.items():
+                weak.append({"skillId": sid, "severity": round(cnt/total_wrong, 2)})
+        if not weak:
+            weak = [{"skillId": "GENERAL.REVIEW", "severity": 0.5}]
+
+        goal_frac = parse_goal(goal_text)
+        user_frac = parse_goal(user_text)
+        support_plan = build_support_plan(weak, goal_frac, user_frac, int(max_q))
+
+        # Geometry context
+        is_geom = detect_geometry_context(evaluation)
+        geom_templates = [
+            "a) Chứng minh hai tam giác đồng dạng (ví dụ ΔAHB ~ ΔCAB) bằng góc bằng nhau.",
+            "b) Suy ra hệ thức độ dài từ tam giác vuông có đường cao: AH^2 = AM.AB; AB^2 = BH.BC; AC^2 = CH.BC; BH.CH = AH^2.",
+            "c) Cho số liệu (vd AB=6cm, BC=10cm), tính AC, AH, BH, CH.",
+            "d) Kẻ đường vuông góc/phân giác qua A để tạo giao điểm và chứng minh các hệ thức tỉ lệ đoạn thẳng.",
+        ]
+
+        # Collect observed wrong items and user comments
+        wrong_items = []
+        for it in evaluation.get("items", []) if isinstance(evaluation, dict) else []:
+            ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
+            if not ok:
+                wrong_items.append({k: it.get(k) for k in ("label","question","skill_tag","rationale")})
+        user_comments = st.session_state.get('error_comments') or ""
+
+        gen_questions: List[Dict[str, Any]] = []
+        if support_plan:
+            gen_prompt = {
+                "task": "generate_support_practice",
+                "instructions": [
+                    "Generate short, clear math questions suited for middle school.",
+                    "Follow the plan: for each skillId, produce the requested counts per difficulty (easy/medium/hard).",
+                    "Calibrate difficulty relative to the exam style; prefer geometry-style problems if topic_hint=geometry.",
+                    "For geometry, DO NOT draw diagrams; write text-only problems similar to school exams with subparts a), b), c).",
+                    "Use right-triangle altitude and similarity facts when appropriate.",
+                    "Incorporate the user's error comments to target misconceptions.",
+                    "Provide final answers and a concise solution_outline; avoid LaTeX and images.",
+                    "Return JSON array only.",
+                ],
+                "plan": support_plan,
+                "topic_hint": "geometry" if is_geom else None,
+                "geometry_templates": geom_templates if is_geom else None,
+                "observed_errors": wrong_items,
+                "user_error_comments": user_comments,
+                "output_schema": {"type": "array"},
+                "locale": lang,
+            }
+            parts = [json.dumps(gen_prompt)]
+            try:
+                gresp = model.generate_content(parts)
+                gen_questions = json.loads(getattr(gresp, "text", "[]"))
+                if not isinstance(gen_questions, list):
+                    gen_questions = []
+            except Exception as e:
+                st.warning(f"Lỗi sinh câu hỏi: {e}")
+                gen_questions = []
+
+        # Hints per wrong item
+        hint_questions: List[Dict[str, Any]] = []
+        if wrong_items:
+            hints_prompt = {
+                "task": "generate_guiding_questions",
+                "instructions": [
+                    "For each wrong item, write 1-2 short guiding questions (Socratic hints) that nudge the student to the next step, without giving the final answer.",
+                    "Keep language concise for grade 8 Vietnamese math; avoid LaTeX.",
+                    "Refer to items by their labels like 'B1.a'.",
+                    "Use user's comments to tailor hints when relevant.",
+                    "Return JSON array only.",
+                ],
+                "wrong_items": wrong_items,
+                "user_error_comments": user_comments,
+                "max_hints": min(8, max(3, len(wrong_items))),
+                "goal_fraction": goal_frac,
+                "output_schema": {"type": "array"},
+                "locale": lang,
+            }
+            try:
+                hresp = model.generate_content([json.dumps(hints_prompt)])
+                hint_questions = json.loads(getattr(hresp, "text", "[]"))
+                if not isinstance(hint_questions, list):
+                    hint_questions = []
+            except Exception:
+                hint_questions = []
+
+        # Persist and render
+        st.session_state.gen_questions = gen_questions
+        st.session_state.hint_questions = hint_questions
+
+# Render suggestions if any
+gen_questions = st.session_state.get('gen_questions') or []
+hint_questions = st.session_state.get('hint_questions') or []
+if gen_questions or hint_questions:
     st.subheader("Gợi ý theo từng mục sai")
     if hint_questions:
         for h in hint_questions:
@@ -601,22 +763,4 @@ if st.button("Phân tích & Gợi ý"):
             if q.get("solution_outline"):
                 st.caption("Gợi ý lời giải: " + str(q.get("solution_outline")))
     else:
-        st.info("Chưa sinh được câu hỏi. Hãy thử tăng số câu hoặc tải ảnh rõ hơn.")
-
-    if 'ds_ocr_text' in locals() and ds_ocr_text:
-        with st.expander("DeepSeek OCR (submission)"):
-            st.code(ds_ocr_text)
-    # Show anchors for debugging
-    if (exam_anchors or sub_anchors):
-        with st.expander("Anchors (OCR-based)"):
-            if exam_anchors:
-                st.markdown("- Exam anchors:")
-                for a in exam_anchors[:20]:
-                    st.markdown(f"  - `{a.get('anchor_id')}`: {a.get('text')[:120]}...")
-            if sub_anchors:
-                st.markdown("- Submission anchors:")
-                for a in sub_anchors[:20]:
-                    st.markdown(f"  - `{a.get('anchor_id')}`: {a.get('text')[:120]}...")
-
-    with st.expander("JSON evaluation"):
-        st.code(json.dumps(evaluation, ensure_ascii=False, indent=2))
+        st.info("Chưa sinh được câu hỏi. Hãy nhập nhận xét và ấn Gợi ý luyện tập.")
