@@ -67,7 +67,11 @@ def ocr_bytes(img_bytes: bytes, language: str = "vi") -> Optional[str]:
         img_path = tf.name
     try:
         # Prompt encourages clean OCR or markdown; choose markdown then post-process to plain lines
-        prompt = os.environ.get("DEEPSEEK_OCR_PROMPT", "<image>\n<|grounding|>Convert the document to markdown.")
+        # Default prompt: preserve math and visible anchors (Bài 1, a), ...)
+        prompt = os.environ.get(
+            "DEEPSEEK_OCR_PROMPT",
+            "<image>\n<|grounding|>Convert the document to markdown; preserve math formulas using inline $...$ and block $$...$$; keep visible labels like 'Bài 1', 'Câu 1', 'a)' on their own lines."
+        )
         # Fallback sizes can be set via env vars
         base_size = int(os.environ.get("DEEPSEEK_OCR_BASE_SIZE", "1024"))
         image_size = int(os.environ.get("DEEPSEEK_OCR_IMAGE_SIZE", "640"))

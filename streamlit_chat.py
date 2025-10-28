@@ -3,6 +3,8 @@ import io
 import json
 import time
 import tempfile
+import re
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
@@ -110,6 +112,80 @@ def call_deepseek_ocr_api(api_base: str, img_name: str, img_bytes: bytes, langua
     except Exception:
         return None
     return None
+
+
+# -------------------- Anchor linking helpers --------------------
+def _strip_accents_lower(s: str) -> str:
+    try:
+        return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn").lower()
+    except Exception:
+        return (s or "").lower()
+
+
+def _detect_big_label(line: str) -> Optional[str]:
+    t = _strip_accents_lower(line or "").strip()
+    m = re.match(r"^(bai|bai\s*toan|bai\s*\w*)\s*(\d+)([^\d]|$)", t)
+    if m:
+        return f"B{int(m.group(2))}"
+    m = re.match(r"^(cau)\s*(\d+)([^\d]|$)", t)
+    if m:
+        return f"B{int(m.group(2))}"
+    m = re.match(r"^(\d+)\s*[\.)]", t)
+    if m:
+        return f"B{int(m.group(1))}"
+    m = re.match(r"^b\s*(\d+)([^\d]|$)", t)
+    if m:
+        return f"B{int(m.group(1))}"
+    return None
+
+
+def _detect_subpart_label(line: str) -> Optional[str]:
+    t = _strip_accents_lower(line or "").strip()
+    m = re.match(r"^([a-z])\s*[\)\.\-]", t)
+    if m:
+        ch = m.group(1)
+        if "a" <= ch <= "z":
+            return ch
+    m = re.match(r"^cau\s*([a-z])([^a-z]|$)", t)
+    if m:
+        return m.group(1)
+    return None
+
+
+def build_anchors_from_text(text: Optional[str]) -> List[Dict[str, Any]]:
+    if not text:
+        return []
+    lines = [ln for ln in str(text).splitlines()]
+    anchors: List[Dict[str, Any]] = []
+    current_big: Optional[str] = None
+    current_id: Optional[str] = None
+    buf: List[str] = []
+
+    def flush():
+        nonlocal buf, current_id
+        if current_id is not None and buf:
+            anchors.append({"anchor_id": current_id, "text": "\n".join(buf).strip()})
+        buf = []
+
+    for ln in lines:
+        big = _detect_big_label(ln)
+        sub = _detect_subpart_label(ln)
+        if big:
+            flush()
+            current_big = big
+            current_id = big
+            buf.append(ln)
+            continue
+        if sub and current_big:
+            flush()
+            current_id = f"{current_big}.{sub}"
+            buf.append(ln)
+            continue
+        if current_id is None and _strip_accents_lower(ln).strip():
+            current_id = current_big or "B0"
+        buf.append(ln)
+    flush()
+    return anchors
 
 
 # -------------------- Scoring helpers --------------------
@@ -286,6 +362,7 @@ def run_pipeline(user_prompt: str):
     # Optional: DeepSeek OCR via backend for submission images
     api_base = os.environ.get("EDUREC_API_BASE", "http://localhost:8000")
     ds_ocr_text = None
+    exam_ocr_text = None
     try:
         texts = []
         for f in (subs or []):
@@ -296,11 +373,25 @@ def run_pipeline(user_prompt: str):
                     texts.append(t)
         if texts:
             ds_ocr_text = "\n\n---\n\n".join(texts)
+        # OCR exam as well to build anchors on exam side
+        etexts = []
+        for f in (exams or []):
+            data = f.getvalue()
+            if is_likely_image_bytes(data):
+                t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
+                if t:
+                    etexts.append(t)
+        if etexts:
+            exam_ocr_text = "\n\n---\n\n".join(etexts)
     except Exception:
         ds_ocr_text = None
 
     # Evaluate: parse exam into Bài/ý labels and map answers
     evaluation = {}
+    # Build anchors from OCR (if available)
+    exam_anchors = build_anchors_from_text(exam_ocr_text) if exam_ocr_text else []
+    sub_anchors = build_anchors_from_text(ds_ocr_text) if ds_ocr_text else []
+
     eval_prompt = {
         "task": "evaluate_submission_items",
         "instructions": [
@@ -311,6 +402,7 @@ def run_pipeline(user_prompt: str):
             "Judge correctness; if no printed points, default 1 point per leaf.",
             "Add a free-form 'skill_tag' for the math topic (e.g., FRAC.SIMPLIFY, EQ.SOLVE_1VAR).",
             "When wrong or partial, produce a brief rationale and a rubric with 2–4 criteria.",
+            "If anchors_hint is provided, prefer mapping by exact anchor_id equality (e.g., 'B1.a'), set mapping_confidence >= 0.9 and copy that anchor text into student_answer.",
             "Return JSON only.",
         ],
         "output_schema": {
@@ -352,6 +444,12 @@ def run_pipeline(user_prompt: str):
                 eval_prompt["instructions"].append("If ocr_hint is provided, use it to improve mapping and cleaner text extraction.")
         except Exception:
             pass
+    # Provide anchors hint when available
+    try:
+        if exam_anchors or sub_anchors:
+            eval_prompt["anchors_hint"] = {"exam": exam_anchors, "submission": sub_anchors}
+    except Exception:
+        pass
     parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + sub_refs
     try:
         evresp = model.generate_content(parts_ev)
@@ -360,6 +458,28 @@ def run_pipeline(user_prompt: str):
             evaluation = {"raw": evaluation}
     except Exception as e:
         evaluation = {"error": str(e)}
+
+    # Post-process: fill missing student_answer via anchors when possible
+    try:
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list) and sub_anchors:
+            sub_map = {a.get("anchor_id"): a.get("text") for a in sub_anchors if a.get("anchor_id")}
+            for it in evaluation["items"]:
+                if not isinstance(it, dict):
+                    continue
+                lbl = it.get("label")
+                if not lbl:
+                    continue
+                if (not it.get("student_answer")) and lbl in sub_map:
+                    it["student_answer"] = sub_map[lbl]
+                    try:
+                        mc = float(it.get("mapping_confidence") or 0.0)
+                    except Exception:
+                        mc = 0.0
+                    it["mapping_confidence"] = max(0.9, mc)
+                    if not it.get("rationale"):
+                        it["rationale"] = "Mapped via Anchor ID"
+    except Exception:
+        pass
 
     # Gradebook + weak skills
     gradebook = derive_gradebook(evaluation)

@@ -3,6 +3,8 @@ import io
 import json
 import time
 import tempfile
+import re
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
@@ -108,6 +110,94 @@ def call_deepseek_ocr_api(api_base: str, img_name: str, img_bytes: bytes, langua
     except Exception:
         return None
     return None
+
+
+# --------------- Anchor linking helpers ---------------
+def _strip_accents_lower(s: str) -> str:
+    try:
+        return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn").lower()
+    except Exception:
+        return s.lower()
+
+
+def _detect_big_label(line: str) -> Optional[str]:
+    t = _strip_accents_lower(line or "").strip()
+    # Bài 1, Bai 1, Bai:1
+    m = re.match(r"^(bai|bai\s*toan|bai\s*\w*)\s*(\d+)([^\d]|$)", t)
+    if m:
+        return f"B{int(m.group(2))}"
+    # Câu 1 as big if no explicit Bài present
+    m = re.match(r"^(cau)\s*(\d+)([^\d]|$)", t)
+    if m:
+        return f"B{int(m.group(2))}"
+    # Numeric heading like '1.' or '1)'
+    m = re.match(r"^(\d+)\s*[\.)]", t)
+    if m:
+        return f"B{int(m.group(1))}"
+    # 'B1', 'B2.' etc
+    m = re.match(r"^b\s*(\d+)([^\d]|$)", t)
+    if m:
+        return f"B{int(m.group(1))}"
+    return None
+
+
+def _detect_subpart_label(line: str) -> Optional[str]:
+    t = _strip_accents_lower(line or "").strip()
+    # a), b., c)
+    m = re.match(r"^([a-z])\s*[\)\.\-]", t)
+    if m:
+        ch = m.group(1)
+        if "a" <= ch <= "z":
+            return ch
+    # 'cau a', 'cau b'
+    m = re.match(r"^cau\s*([a-z])([^a-z]|$)", t)
+    if m:
+        return m.group(1)
+    return None
+
+
+def build_anchors_from_text(text: Optional[str]) -> List[Dict[str, Any]]:
+    """Build anchor segments from OCR text. Each segment has an anchor_id and text.
+    - Big anchors: B{n}
+    - Subparts: B{n}.{letter}
+    """
+    if not text:
+        return []
+    lines = [ln for ln in str(text).splitlines()]
+    anchors: List[Dict[str, Any]] = []
+    current_big: Optional[str] = None
+    current_id: Optional[str] = None
+    buf: List[str] = []
+
+    def flush():
+        nonlocal buf, current_id
+        if current_id is not None and buf:
+            anchors.append({"anchor_id": current_id, "text": "\n".join(buf).strip()})
+        buf = []
+
+    for ln in lines:
+        big = _detect_big_label(ln)
+        sub = _detect_subpart_label(ln)
+        if big:
+            # starting a new big question
+            flush()
+            current_big = big
+            current_id = big
+            # keep the heading line in buffer, helps context
+            buf.append(ln)
+            continue
+        if sub and current_big:
+            flush()
+            current_id = f"{current_big}.{sub}"
+            buf.append(ln)
+            continue
+        # default: continue current segment
+        if current_id is None and _strip_accents_lower(ln).strip():
+            # Start a default segment if any text appears
+            current_id = current_big or "B0"
+        buf.append(ln)
+    flush()
+    return anchors
 
 
 # --------------- Scoring helpers ---------------
@@ -249,6 +339,7 @@ if st.button("Phân tích & Gợi ý"):
     # Optional: DeepSeek OCR via backend for submission images
     api_base = os.environ.get("EDUREC_API_BASE", "http://localhost:8000")
     ds_ocr_text = None
+    exam_ocr_text = None
     try:
         texts = []
         for f in (subs or []):
@@ -259,11 +350,26 @@ if st.button("Phân tích & Gợi ý"):
                     texts.append(t)
         if texts:
             ds_ocr_text = "\n\n---\n\n".join(texts)
+        # OCR exam as well (for Anchor IDs on exam side)
+        etexts = []
+        for f in (exams or []):
+            data = f.getvalue()
+            if is_likely_image_bytes(data):
+                t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
+                if t:
+                    etexts.append(t)
+        if etexts:
+            exam_ocr_text = "\n\n---\n\n".join(etexts)
     except Exception:
         ds_ocr_text = None
+        exam_ocr_text = None
 
     # Evaluate: parse exam into Bài/ý and map answers
     evaluation: Dict[str, Any] = {}
+    # Build anchors from OCR (if available)
+    exam_anchors = build_anchors_from_text(exam_ocr_text) if exam_ocr_text else []
+    sub_anchors = build_anchors_from_text(ds_ocr_text) if ds_ocr_text else []
+
     eval_prompt = {
         "task": "evaluate_submission_items",
         "instructions": [
@@ -273,6 +379,7 @@ if st.button("Phân tích & Gợi ý"):
             "Map student's answers from the submission to these leaf labels; set mapping_confidence.",
             "Judge correctness; if no printed points, default 1 point per leaf.",
             "Add a free-form 'skill_tag' for the math topic (e.g., GEOM.SIMILARITY, GEOM.ALTITUDE, FRAC.SIMPLIFY, EQ.SOLVE_1VAR).",
+            "If anchors_hint is provided, prefer mapping by exact anchor_id equality (e.g., anchor 'B1.a' -> label 'B1.a'); when used, set mapping_confidence >= 0.9 and copy the corresponding anchor text into student_answer.",
             "Return JSON only.",
         ],
         "output_schema": {
@@ -293,6 +400,12 @@ if st.button("Phân tích & Gợi ý"):
                 eval_prompt["instructions"].append("If ocr_hint is provided, use it to improve mapping and cleaner text extraction.")
         except Exception:
             pass
+    # Provide anchors hint when available
+    try:
+        if exam_anchors or sub_anchors:
+            eval_prompt["anchors_hint"] = {"exam": exam_anchors, "submission": sub_anchors}
+    except Exception:
+        pass
     parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + sub_refs
     try:
         evresp = model.generate_content(parts_ev)
@@ -302,6 +415,29 @@ if st.button("Phân tích & Gợi ý"):
     except Exception as e:
         st.error(f"Lỗi đánh giá: {e}")
         evaluation = {}
+
+    # Post-process: fill missing student_answer via Anchor IDs when possible
+    try:
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list) and sub_anchors:
+            sub_map = {a.get("anchor_id"): a.get("text") for a in sub_anchors if a.get("anchor_id")}
+            for it in evaluation["items"]:
+                if not isinstance(it, dict):
+                    continue
+                lbl = it.get("label")
+                if not lbl:
+                    continue
+                if (not it.get("student_answer")) and lbl in sub_map:
+                    it["student_answer"] = sub_map[lbl]
+                    # boost mapping confidence if we mapped by exact anchor id
+                    try:
+                        mc = float(it.get("mapping_confidence") or 0.0)
+                    except Exception:
+                        mc = 0.0
+                    it["mapping_confidence"] = max(0.9, mc)
+                    if not it.get("rationale"):
+                        it["rationale"] = "Mapped via Anchor ID"
+    except Exception:
+        pass
 
     # Gradebook & weak skills
     gradebook = derive_gradebook(evaluation)
@@ -435,6 +571,17 @@ if st.button("Phân tích & Gợi ý"):
     if 'ds_ocr_text' in locals() and ds_ocr_text:
         with st.expander("DeepSeek OCR (submission)"):
             st.code(ds_ocr_text)
+    # Show anchors for debugging
+    if (exam_anchors or sub_anchors):
+        with st.expander("Anchors (OCR-based)"):
+            if exam_anchors:
+                st.markdown("- Exam anchors:")
+                for a in exam_anchors[:20]:
+                    st.markdown(f"  - `{a.get('anchor_id')}`: {a.get('text')[:120]}...")
+            if sub_anchors:
+                st.markdown("- Submission anchors:")
+                for a in sub_anchors[:20]:
+                    st.markdown(f"  - `{a.get('anchor_id')}`: {a.get('text')[:120]}...")
 
     with st.expander("JSON evaluation"):
         st.code(json.dumps(evaluation, ensure_ascii=False, indent=2))
