@@ -201,6 +201,69 @@ def build_anchors_from_text(text: Optional[str]) -> List[Dict[str, Any]]:
 
 
 # --------------- Scoring helpers ---------------
+def _normalize_num_token(tok: str) -> Optional[float]:
+    if tok is None:
+        return None
+    s = str(tok).strip()
+    if not s:
+        return None
+    s = s.replace(" ", "").replace(",", ".")
+    # fraction a/b
+    if "/" in s and all(part.strip() for part in s.split("/", 1)):
+        try:
+            a, b = s.split("/", 1)
+            a = float(a); b = float(b)
+            if b != 0:
+                return a / b
+        except Exception:
+            pass
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _split_candidates(txt: str) -> List[str]:
+    if not txt:
+        return []
+    # split by common separators
+    parts = re.split(r"[;\n,]+", str(txt))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def rule_check_correct(student: Optional[str], gold: Optional[str]) -> Optional[bool]:
+    """Conservative rule-based check.
+    - If both parse to numeric (or lists of numerics), compare with tolerance.
+    - Else if normalized exact string match, consider correct.
+    Returns True/False, or None if uncertain.
+    """
+    if not student or not gold:
+        return None
+    # List case
+    s_parts = _split_candidates(student)
+    g_parts = _split_candidates(gold)
+    if s_parts and g_parts:
+        s_nums = [_normalize_num_token(x) for x in s_parts]
+        g_nums = [_normalize_num_token(x) for x in g_parts]
+        if all(v is not None for v in s_nums) and all(v is not None for v in g_nums):
+            if len(s_nums) == len(g_nums):
+                s_sorted = sorted(s_nums)
+                g_sorted = sorted(g_nums)
+                return all(abs(a - b) <= 1e-6 for a, b in zip(s_sorted, g_sorted))
+    # Single numeric
+    sn = _normalize_num_token(student)
+    gn = _normalize_num_token(gold)
+    if sn is not None and gn is not None:
+        return abs(sn - gn) <= 1e-6
+    # Fallback to normalized exact text
+    def norm(s: str) -> str:
+        s = unicodedata.normalize("NFKC", s)
+        s = s.lower().strip()
+        s = re.sub(r"\s+", " ", s)
+        return s
+    if norm(student) == norm(gold):
+        return True
+    return None
 def parse_goal(goal_text: Optional[str]) -> Optional[float]:
     if not goal_text:
         return None
@@ -491,6 +554,34 @@ if analyze_clicked:
                     continue
                 if (not it.get("correct_answer")) and lbl in key_map:
                     it["correct_answer"] = key_map[lbl]
+        # Rule-based correctness override when clear
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list):
+            for it in evaluation["items"]:
+                if not isinstance(it, dict):
+                    continue
+                st_ans = it.get("student_answer")
+                gold = it.get("correct_answer")
+                rc = rule_check_correct(st_ans, gold)
+                if rc is True:
+                    it["llm_judgement_correct"] = True
+                    it.setdefault("points", it.get("points") or 1.0)
+                    try:
+                        it["points_earned"] = float(it.get("points"))
+                    except Exception:
+                        it["points_earned"] = 1.0
+                    if it.get("rationale"):
+                        it["rationale"] = str(it["rationale"]) + " | Rule-check: exact match"
+                    else:
+                        it["rationale"] = "Rule-check: exact match"
+                elif rc is False:
+                    if it.get("llm_judgement_correct") is None and it.get("is_marked_correct") is None:
+                        it["llm_judgement_correct"] = False
+                    if it.get("points_earned") is None:
+                        it["points_earned"] = 0.0
+                    if it.get("rationale"):
+                        it["rationale"] = str(it["rationale"]) + " | Rule-check: mismatch"
+                    else:
+                        it["rationale"] = "Rule-check: mismatch"
     except Exception:
         pass
 
@@ -565,9 +656,28 @@ if isinstance(evaluation, dict) and evaluation:
                 "Điểm": (f"{pe}/{pts}" if (pe is not None or pts is not None) else "—"),
                 "Đề bài": (str(ques)[:90] + ("…" if len(str(ques)) > 90 else "")),
                 "Bài làm": (ans[:90] + ("…" if len(ans) > 90 else "")),
-                "Đáp án chuẩn": (gold[:90] + ("…" if len(gold) > 90 else ""))
+                "Đáp án chuẩn": (gold[:90] + ("…" if len(gold) > 90 else "")),
+                "Nhận xét": (st.session_state.get('comments_map', {}).get(lbl, ""))
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        # Editable table for per-item comments
+        edited = st.data_editor(
+            rows,
+            num_rows="fixed",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Nhận xét": st.column_config.TextColumn("Nhận xét", width="medium", help="Nhập nhận xét/nhầm lẫn cho mục này"),
+                "Đề bài": st.column_config.TextColumn("Đề bài", width="large"),
+                "Bài làm": st.column_config.TextColumn("Bài làm", width="large"),
+                "Đáp án chuẩn": st.column_config.TextColumn("Đáp án chuẩn", width="large"),
+            },
+            disabled=["Mục","Đúng?","Tin cậy","Điểm","Đề bài","Bài làm","Đáp án chuẩn"],
+        )
+        # Persist comments map to session for suggestion step
+        try:
+            st.session_state.comments_map = {row.get("Mục"): row.get("Nhận xét") for row in (edited or []) if row.get("Mục")}
+        except Exception:
+            st.session_state.comments_map = st.session_state.get('comments_map', {})
         with st.expander("Chi tiết (đầy đủ) theo từng mục"):
             for it in items:
                 if not isinstance(it, dict):
@@ -599,13 +709,8 @@ if isinstance(evaluation, dict) and evaluation:
     else:
         st.info("Chưa có dữ liệu trích xuất từ bài làm.")
 
-    # Error comments input before suggestion
-    st.subheader("Nhận xét lỗi sai (tự nhập)")
-    st.text_area(
-        "Viết theo dạng: B1.a: nhầm công thức; B2.c: thiếu điều kiện…",
-        key="error_comments",
-        height=120,
-    )
+    # Nhắc người dùng nhập nhận xét ngay ở cột Nhận xét của bảng trên.
+    st.caption("Mẹo: điền nhận xét vào cột 'Nhận xét' của bảng trên cho từng mục.")
 
     # Debug: OCR and anchors
     if ds_ocr_text:
@@ -679,7 +784,8 @@ if suggest_clicked:
             ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
             if not ok:
                 wrong_items.append({k: it.get(k) for k in ("label","question","skill_tag","rationale")})
-        user_comments = st.session_state.get('error_comments') or ""
+        # Build user comments per-item map
+        comments_map = st.session_state.get('comments_map') or {}
 
         gen_questions: List[Dict[str, Any]] = []
         if support_plan:
@@ -689,17 +795,17 @@ if suggest_clicked:
                     "Generate short, clear math questions suited for middle school.",
                     "Follow the plan: for each skillId, produce the requested counts per difficulty (easy/medium/hard).",
                     "Calibrate difficulty relative to the exam style; prefer geometry-style problems if topic_hint=geometry.",
-                    "For geometry, DO NOT draw diagrams; write text-only problems similar to school exams with subparts a), b), c).",
-                    "Use right-triangle altitude and similarity facts when appropriate.",
-                    "Incorporate the user's error comments to target misconceptions.",
-                    "Provide final answers and a concise solution_outline; avoid LaTeX and images.",
+                    "You MAY use inline LaTeX ($...$) for formulas so it is readable; keep text concise.",
+                    "If geometry, you may include a small inline SVG diagram in 'diagram_svg' (viewBox '0 0 300 200').",
+                    "Incorporate the user's error comments per item to target misconceptions.",
+                    "Provide final answers and a concise solution_outline; no external images or links.",
                     "Return JSON array only.",
                 ],
                 "plan": support_plan,
                 "topic_hint": "geometry" if is_geom else None,
                 "geometry_templates": geom_templates if is_geom else None,
                 "observed_errors": wrong_items,
-                "user_error_comments": user_comments,
+                "user_error_comments_map": comments_map,
                 "output_schema": {"type": "array"},
                 "locale": lang,
             }
@@ -720,13 +826,13 @@ if suggest_clicked:
                 "task": "generate_guiding_questions",
                 "instructions": [
                     "For each wrong item, write 1-2 short guiding questions (Socratic hints) that nudge the student to the next step, without giving the final answer.",
-                    "Keep language concise for grade 8 Vietnamese math; avoid LaTeX.",
+                    "Keep language concise for grade 8 Vietnamese math.",
                     "Refer to items by their labels like 'B1.a'.",
-                    "Use user's comments to tailor hints when relevant.",
+                    "Use user's comments per item to tailor hints when relevant.",
                     "Return JSON array only.",
                 ],
                 "wrong_items": wrong_items,
-                "user_error_comments": user_comments,
+                "user_error_comments_map": comments_map,
                 "max_hints": min(8, max(3, len(wrong_items))),
                 "goal_fraction": goal_frac,
                 "output_schema": {"type": "array"},
@@ -758,8 +864,18 @@ if gen_questions or hint_questions:
     st.subheader("Câu hỏi luyện tập được gợi ý")
     if gen_questions:
         for i, q in enumerate(gen_questions, 1):
-            st.markdown(f"{i}. [{q.get('skillId')}] {q.get('question')}")
-            st.markdown(f"   Đáp án: {q.get('answer')}")
+            skill = q.get('skillId') or ''
+            question = q.get('question') or ''
+            st.markdown(f"{i}. [{skill}] {question}")
+            # Optional diagram
+            svg = q.get('diagram_svg')
+            if isinstance(svg, str) and svg.strip():
+                components.html(svg, height=240)
+            elif q.get('diagram_description'):
+                st.caption("Sơ đồ: " + str(q.get('diagram_description')))
+            ans = q.get('answer')
+            if ans is not None:
+                st.markdown(f"   Đáp án: {ans}")
             if q.get("solution_outline"):
                 st.caption("Gợi ý lời giải: " + str(q.get("solution_outline")))
     else:
