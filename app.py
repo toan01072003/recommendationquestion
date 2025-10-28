@@ -484,6 +484,8 @@ async def evaluate_with_key(
             "Add a free-form 'skill_tag' for the math topic.",
             "Step-level grading: for each item, extract solution_steps_expected (from key) and student_steps (from submission).",
             "Align into step_evaluation array: {step_index, expected_step, student_step, matches_expected, error_type, notes}.",
+            "Output all texts (solution_steps_expected, student_steps, rationale) in Vietnamese (vi). Rewrite into Vietnamese if the key is in another language.",
+            "Return a concise 'correct_answer' (final answer only) in Vietnamese with units if shown in the key.",
             "Return strictly valid JSON only.",
         ],
         "output_schema": {

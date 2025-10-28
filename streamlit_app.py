@@ -300,6 +300,32 @@ def rule_check_correct(student: Optional[str], gold: Optional[str]) -> Optional[
     if norm(student) == norm(gold):
         return True
     return None
+
+
+def extract_final_answer_from_text(text: Optional[str]) -> str:
+    """Heuristic to extract final answer from an answer-key text block.
+    - Prefer lines containing 'Đáp án', 'Kết quả' (case-insensitive, accent-insensitive).
+    - Else take the last non-empty line; if it contains '=', take RHS.
+    """
+    if not text:
+        return ""
+    try:
+        lines = [ln.strip() for ln in str(text).splitlines() if str(ln).strip()]
+        if not lines:
+            return ""
+        for ln in reversed(lines):
+            t = _strip_accents_lower(ln)
+            if ("dap an" in t) or ("ket qua" in t) or t.startswith("kq"):
+                if ":" in ln:
+                    return ln.split(":", 1)[1].strip()
+                return ln.strip()
+        last = lines[-1]
+        if "=" in last:
+            rhs = last.split("=")[-1].strip()
+            return rhs or last
+        return last
+    except Exception:
+        return ""
 def parse_goal(goal_text: Optional[str]) -> Optional[float]:
     if not goal_text:
         return None
@@ -532,6 +558,8 @@ if analyze_clicked:
                 "Judge correctness; if no printed points, default 1 point per leaf.",
                 "Add a free-form 'skill_tag' for the math topic.",
                 "Step-level grading: extract solution_steps_expected and student_steps, and provide step_evaluation.",
+                "Output all texts (solution_steps_expected, student_steps, rationale) in Vietnamese (vi). If needed, rewrite into Vietnamese.",
+                "Return a concise 'correct_answer' (final answer only) in Vietnamese with units if shown in the key.",
                 "Return JSON only.",
             ],
             "output_schema": {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"], "additionalProperties": False},
@@ -728,7 +756,9 @@ if isinstance(evaluation, dict) and evaluation:
             lbl = it.get("label")
             ques = (it.get("question") or ((exam_map.get(lbl, "")) if lbl else ""))
             ans = it.get("student_answer") or ""
-            gold = (it.get("correct_answer") or ((key_map.get(lbl, "")) if lbl else ""))
+            gold = it.get("correct_answer")
+            if not gold and lbl:
+                gold = extract_final_answer_from_text(key_map.get(lbl, ""))
             try:
                 conf = float(it.get("mapping_confidence")) if it.get("mapping_confidence") is not None else None
             except Exception:
@@ -810,7 +840,7 @@ if isinstance(evaluation, dict) and evaluation:
                 lbl = it.get("label") or "—"
                 ques = (it.get("question") or ((exam_map.get(lbl, "")) if lbl else "")) or ""
                 ans = it.get("student_answer") or ""
-                gold = (it.get("correct_answer") or ((key_map.get(lbl, "")) if lbl else ""))
+                gold = it.get("correct_answer") or extract_final_answer_from_text(key_map.get(lbl, ""))
                 ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
                 st.markdown(f"### `{lbl}` — {'Đúng' if ok else 'Sai' if ok is False else '?'}")
                 if ques:
