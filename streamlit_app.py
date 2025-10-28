@@ -726,9 +726,9 @@ if isinstance(evaluation, dict) and evaluation:
             if not isinstance(it, dict):
                 continue
             lbl = it.get("label")
-            ques = (it.get("question") or (exam_map.get(lbl) if lbl else ""))
+            ques = (it.get("question") or ((exam_map.get(lbl, "")) if lbl else ""))
             ans = it.get("student_answer") or ""
-            gold = it.get("correct_answer") or (key_map.get(lbl) if lbl else "")
+            gold = (it.get("correct_answer") or ((key_map.get(lbl, "")) if lbl else ""))
             try:
                 conf = float(it.get("mapping_confidence")) if it.get("mapping_confidence") is not None else None
             except Exception:
@@ -742,8 +742,8 @@ if isinstance(evaluation, dict) and evaluation:
                 "Tin cậy": (f"{round(conf*100):d}%" if isinstance(conf, (int, float)) else "—"),
                 "Điểm": (f"{pe}/{pts}" if (pe is not None or pts is not None) else "—"),
                 "Đề bài": (str(ques)[:90] + ("…" if len(str(ques)) > 90 else "")),
-                "Bài làm": (ans[:90] + ("…" if len(ans) > 90 else "")),
-                "Đáp án chuẩn": (gold[:90] + ("…" if len(gold) > 90 else "")),
+                "Bài làm": (str(ans)[:90] + ("…" if len(str(ans)) > 90 else "")),
+                "Đáp án chuẩn": (str(gold)[:90] + ("…" if len(str(gold)) > 90 else "")),
                 "Nhận xét": (st.session_state.get('comments_map', {}).get(lbl, ""))
             })
         # Editable table for per-item comments
@@ -770,9 +770,9 @@ if isinstance(evaluation, dict) and evaluation:
                 if not isinstance(it, dict):
                     continue
                 lbl = it.get("label") or "—"
-                ques = (it.get("question") or (exam_map.get(lbl) if lbl else "")) or ""
+                ques = (it.get("question") or ((exam_map.get(lbl, "")) if lbl else "")) or ""
                 ans = it.get("student_answer") or ""
-                gold = it.get("correct_answer") or (key_map.get(lbl) if lbl else "")
+                gold = (it.get("correct_answer") or ((key_map.get(lbl, "")) if lbl else ""))
                 ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
                 st.markdown(f"### `{lbl}` — {'Đúng' if ok else 'Sai' if ok is False else '?'}")
                 if ques:
