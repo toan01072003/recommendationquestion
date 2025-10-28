@@ -736,6 +736,38 @@ if isinstance(evaluation, dict) and evaluation:
             ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
             pts = it.get("points")
             pe = it.get("points_earned")
+            # Steps summary
+            exp_steps = it.get("solution_steps_expected") or []
+            stu_steps = it.get("student_steps") or []
+            step_eval = it.get("step_evaluation") or []
+            # Count correct steps and first wrong index if available
+            step_ok = 0
+            first_wrong = None
+            if isinstance(step_eval, list) and step_eval:
+                for idx, ev in enumerate(step_eval, start=1):
+                    if isinstance(ev, dict) and ev.get("matches_expected") is True:
+                        step_ok += 1
+                    else:
+                        if first_wrong is None:
+                            first_wrong = idx
+            total_steps = max(len(exp_steps) if isinstance(exp_steps, list) else 0,
+                              len(stu_steps) if isinstance(stu_steps, list) else 0,
+                              len(step_eval) if isinstance(step_eval, list) else 0)
+            if total_steps == 0 and isinstance(exp_steps, list):
+                total_steps = len(exp_steps)
+            # Join first few steps for display
+            def _join_steps(lst):
+                try:
+                    parts = [str(x).strip() for x in (lst or []) if str(x).strip()]
+                    s = " | ".join(parts[:3])
+                    return s[:90] + ("…" if len(s) > 90 else "")
+                except Exception:
+                    return ""
+            exp_join = _join_steps(exp_steps)
+            stu_join = _join_steps(stu_steps)
+            comp = f"{step_ok}/{total_steps}"
+            if first_wrong is not None:
+                comp += f" (sai từ bước {first_wrong})"
             rows.append({
                 "Mục": lbl,
                 "Đúng?": "✓" if ok else ("✗" if ok is False else "?"),
@@ -744,6 +776,9 @@ if isinstance(evaluation, dict) and evaluation:
                 "Đề bài": (str(ques)[:90] + ("…" if len(str(ques)) > 90 else "")),
                 "Bài làm": (str(ans)[:90] + ("…" if len(str(ans)) > 90 else "")),
                 "Đáp án chuẩn": (str(gold)[:90] + ("…" if len(str(gold)) > 90 else "")),
+                "Bước (chuẩn)": exp_join,
+                "Bước (HS)": stu_join,
+                "Đối chiếu bước": comp if total_steps > 0 else "—",
                 "Nhận xét": (st.session_state.get('comments_map', {}).get(lbl, ""))
             })
         # Editable table for per-item comments
@@ -757,8 +792,11 @@ if isinstance(evaluation, dict) and evaluation:
                 "Đề bài": st.column_config.TextColumn("Đề bài", width="large"),
                 "Bài làm": st.column_config.TextColumn("Bài làm", width="large"),
                 "Đáp án chuẩn": st.column_config.TextColumn("Đáp án chuẩn", width="large"),
+                "Bước (chuẩn)": st.column_config.TextColumn("Bước (chuẩn)", width="large"),
+                "Bước (HS)": st.column_config.TextColumn("Bước (HS)", width="large"),
+                "Đối chiếu bước": st.column_config.TextColumn("Đối chiếu bước", width="medium"),
             },
-            disabled=["Mục","Đúng?","Tin cậy","Điểm","Đề bài","Bài làm","Đáp án chuẩn"],
+            disabled=["Mục","Đúng?","Tin cậy","Điểm","Đề bài","Bài làm","Đáp án chuẩn","Bước (chuẩn)","Bước (HS)","Đối chiếu bước"],
         )
         # Persist comments map to session for suggestion step
         try:
