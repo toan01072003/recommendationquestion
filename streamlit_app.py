@@ -112,6 +112,30 @@ def call_deepseek_ocr_api(api_base: str, img_name: str, img_bytes: bytes, langua
     return None
 
 
+def call_evaluate_with_key_api(api_base: str,
+                               exam_file: Optional[bytes], exam_name: Optional[str],
+                               key_file: Optional[bytes], key_name: Optional[str],
+                               sub_file: bytes, sub_name: Optional[str],
+                               language: str = "vi") -> Optional[Dict[str, Any]]:
+    """Call FastAPI endpoint /assessments/evaluate-with-key. Returns dict or None."""
+    if not sub_file:
+        return None
+    url = (api_base or "http://localhost:8000").rstrip("/") + "/assessments/evaluate-with-key"
+    files = {}
+    if exam_file:
+        files["exam_image"] = (exam_name or "exam.png", exam_file, "application/octet-stream")
+    if key_file:
+        files["answer_key_image"] = (key_name or "answer.png", key_file, "application/octet-stream")
+    files["submission_image"] = (sub_name or "submission.png", sub_file, "application/octet-stream")
+    data = {"language": language or "vi"}
+    try:
+        resp = requests.post(url, files=files, data=data, timeout=90)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
 # --------------- Anchor linking helpers ---------------
 def _strip_accents_lower(s: str) -> str:
     try:
@@ -469,59 +493,53 @@ if analyze_clicked:
     sub_anchors = build_anchors_from_text(ds_ocr_text) if ds_ocr_text else []
     key_anchors = build_anchors_from_text(ans_ocr_text) if ans_ocr_text else []
 
-    eval_prompt = {
-        "task": "evaluate_submission_items",
-        "instructions": [
-            "Parse the exam into big questions 'Bài x' and subparts 'a,b,c'.",
-            "Normalize labels as 'B1.a', 'B1.b', ... (ASCII only).",
-            "Extract short 'question' texts for each leaf.",
-            "Map student's answers from the submission to these leaf labels; set mapping_confidence.",
-            "Use the provided answer key (answer_key_ocr and anchors_hint.answer_key) to determine correctness and partial credit where applicable. Prefer explicit marking in the key; otherwise infer.",
-            "Judge correctness; if no printed points, default 1 point per leaf.",
-            "Add a free-form 'skill_tag' for the math topic (e.g., GEOM.SIMILARITY, GEOM.ALTITUDE, FRAC.SIMPLIFY, EQ.SOLVE_1VAR).",
-            "If anchors_hint is provided, prefer mapping by exact anchor_id equality (e.g., anchor 'B1.a' -> label 'B1.a'); when used, set mapping_confidence >= 0.9 and copy the corresponding anchor text into student_answer.",
-            "Include 'correct_answer' when determinable from the answer key; include a brief 'answer_rationale' if helpful.",
-            "Return JSON only.",
-        ],
-        "output_schema": {
-            "type": "object",
-            "properties": {
-                "items": {"type": "array"}
-            },
-            "required": ["items"],
-            "additionalProperties": False,
-        },
-        "locale": lang,
-    }
-    # Provide OCR hint to the LLM if available
-    if 'ds_ocr_text' in locals() and ds_ocr_text:
-        try:
-            eval_prompt["ocr_hint"] = ds_ocr_text
-            if isinstance(eval_prompt.get("instructions"), list):
-                eval_prompt["instructions"].append("If ocr_hint is provided, use it to improve mapping and cleaner text extraction.")
-        except Exception:
-            pass
-    # Provide answer key OCR text too
-    if ans_ocr_text:
-        try:
-            eval_prompt["answer_key_ocr"] = ans_ocr_text
-        except Exception:
-            pass
-    # Provide anchors hint when available
+    # Prefer server API evaluation (handles step-level + cascade rule)
+    ex_bytes = None; ex_name = None
+    key_bytes0 = None; key_name = None
+    sub_bytes0 = None; sub_name = None
     try:
-        if exam_anchors or sub_anchors or key_anchors:
-            eval_prompt["anchors_hint"] = {"exam": exam_anchors, "answer_key": key_anchors, "submission": sub_anchors}
+        if exams:
+            ex_bytes = exams[0].getvalue(); ex_name = exams[0].name
+        if keys:
+            key_bytes0 = keys[0].getvalue(); key_name = keys[0].name
+        if subs:
+            sub_bytes0 = subs[0].getvalue(); sub_name = subs[0].name
     except Exception:
         pass
-    parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + key_refs + sub_refs
-    try:
-        evresp = model.generate_content(parts_ev)
-        evaluation = json.loads(getattr(evresp, "text", "{}"))
-        if not isinstance(evaluation, dict):
-            evaluation = {"raw": evaluation}
-    except Exception as e:
-        st.error(f"Lỗi đánh giá: {e}")
-        evaluation = {}
+    evaluation = call_evaluate_with_key_api(api_base, ex_bytes, ex_name, key_bytes0, key_name, sub_bytes0 or b"", sub_name, language=lang) or {}
+    # Fallback to in-app LLM evaluation when API unavailable
+    if not evaluation:
+        eval_prompt = {
+            "task": "evaluate_submission_items",
+            "instructions": [
+                "Parse the exam into big questions 'Bài x' and subparts 'a,b,c'.",
+                "Normalize labels as 'B1.a', 'B1.b', ... (ASCII only).",
+                "Extract short 'question' texts for each leaf.",
+                "Map student's answers from the submission to these leaf labels; set mapping_confidence.",
+                "Use the provided answer key (answer_key_ocr and anchors_hint.answer_key) to determine correctness and partial credit where applicable.",
+                "Judge correctness; if no printed points, default 1 point per leaf.",
+                "Add a free-form 'skill_tag' for the math topic.",
+                "Step-level grading: extract solution_steps_expected and student_steps, and provide step_evaluation.",
+                "Return JSON only.",
+            ],
+            "output_schema": {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"], "additionalProperties": False},
+            "locale": lang,
+        }
+        if ds_ocr_text:
+            eval_prompt["ocr_hint"] = ds_ocr_text
+        if ans_ocr_text:
+            eval_prompt["answer_key_ocr"] = ans_ocr_text
+        if exam_anchors or sub_anchors or key_anchors:
+            eval_prompt["anchors_hint"] = {"exam": exam_anchors, "answer_key": key_anchors, "submission": sub_anchors}
+        parts_ev: List[Any] = [json.dumps(eval_prompt)] + exam_refs + key_refs + sub_refs
+        try:
+            evresp = model.generate_content(parts_ev)
+            evaluation = json.loads(getattr(evresp, "text", "{}"))
+            if not isinstance(evaluation, dict):
+                evaluation = {"raw": evaluation}
+        except Exception as e:
+            st.error(f"Lỗi đánh giá: {e}")
+            evaluation = {}
 
     # Post-process: fill missing student_answer via Anchor IDs when possible
     try:
@@ -582,6 +600,62 @@ if analyze_clicked:
                         it["rationale"] = str(it["rationale"]) + " | Rule-check: mismatch"
                     else:
                         it["rationale"] = "Rule-check: mismatch"
+    except Exception:
+        pass
+
+    # If step-level details missing but both sides have steps, perform simple rule-based step matching
+    try:
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list):
+            for it in evaluation["items"]:
+                if not isinstance(it, dict):
+                    continue
+                if it.get("step_evaluation"):
+                    continue
+                exp_steps = it.get("solution_steps_expected") or []
+                stu_steps = it.get("student_steps") or []
+                if not isinstance(exp_steps, list) or not isinstance(stu_steps, list):
+                    continue
+                n = max(len(exp_steps), len(stu_steps))
+                if n == 0:
+                    continue
+                ev = []
+                correct_count = 0
+                wrong_seen = False
+                for i in range(n):
+                    e = (exp_steps[i] if i < len(exp_steps) else None) or ""
+                    s = (stu_steps[i] if i < len(stu_steps) else None) or ""
+                    ok = (re.sub(r"\s+", " ", str(e)).strip().lower() == re.sub(r"\s+", " ", str(s)).strip().lower()) if (e and s) else False
+                    if wrong_seen:
+                        ok = False
+                    row = {
+                        "step_index": i+1,
+                        "expected_step": e,
+                        "student_step": s,
+                        "matches_expected": bool(ok),
+                        "error_type": None if ok else ("CASCADE_AFTER_WRONG" if wrong_seen else "MISMATCH"),
+                        "notes": None,
+                    }
+                    if not wrong_seen and ok:
+                        correct_count += 1
+                    if not wrong_seen and not ok:
+                        wrong_seen = True
+                    ev.append(row)
+                it["step_evaluation"] = ev
+                # derive partial credit when total points known
+                try:
+                    pts = float(it.get("points") or 1.0)
+                except Exception:
+                    pts = 1.0
+                earned = pts * (correct_count / n)
+                it["points"] = pts
+                if it.get("points_earned") is None:
+                    it["points_earned"] = round(earned, 2)
+                # add rationale note
+                note = f"Rule-step-check: {correct_count}/{n} steps matched"
+                if it.get("rationale"):
+                    it["rationale"] = str(it["rationale"]) + " | " + note
+                else:
+                    it["rationale"] = note
     except Exception:
         pass
 
@@ -697,6 +771,22 @@ if isinstance(evaluation, dict) and evaluation:
                 if gold:
                     st.caption("Đáp án/Chấm điểm:")
                     st.code(gold)
+                # Step-by-step comparison when available
+                exp_steps = it.get("solution_steps_expected") or []
+                stu_steps = it.get("student_steps") or []
+                step_eval = it.get("step_evaluation") or []
+                if exp_steps or stu_steps or step_eval:
+                    st.caption("Đối chiếu từng bước:")
+                    rows_steps = []
+                    n = max(len(exp_steps), len(stu_steps), len(step_eval))
+                    for i in range(n):
+                        es = exp_steps[i] if i < len(exp_steps) else ""
+                        ss = stu_steps[i] if i < len(stu_steps) else ""
+                        ev = step_eval[i] if i < len(step_eval) and isinstance(step_eval[i], dict) else {}
+                        m = ev.get("matches_expected")
+                        mark = "✓" if m is True else ("✗" if m is False else "?")
+                        rows_steps.append({"Bước": i+1, "Đáp án chuẩn": es, "Bước của HS": ss, "Đúng?": mark, "Lỗi": ev.get("error_type") or ""})
+                    st.dataframe(rows_steps, use_container_width=True, hide_index=True)
                 if it.get("rationale"):
                     st.caption("Nhận xét của hệ thống:")
                     st.write(it.get("rationale"))
@@ -783,7 +873,15 @@ if suggest_clicked:
         for it in evaluation.get("items", []) if isinstance(evaluation, dict) else []:
             ok = (it.get("is_marked_correct") is True) or (it.get("llm_judgement_correct") is True)
             if not ok:
-                wrong_items.append({k: it.get(k) for k in ("label","question","skill_tag","rationale")})
+                wi = {k: it.get(k) for k in ("label","question","skill_tag","rationale")}
+                # include step-level errors if present
+                se = []
+                for ev in (it.get("step_evaluation") or []):
+                    if isinstance(ev, dict) and ev.get("matches_expected") is False:
+                        se.append({"step_index": ev.get("step_index"), "error_type": ev.get("error_type"), "student_step": ev.get("student_step"), "expected_step": ev.get("expected_step")})
+                if se:
+                    wi["step_errors"] = se[:5]
+                wrong_items.append(wi)
         # Build user comments per-item map
         comments_map = st.session_state.get('comments_map') or {}
 

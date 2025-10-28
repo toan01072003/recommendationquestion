@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import base64, requests
 from deepseek_ocr import ocr_bytes as _ds_ocr
+import re
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 EXAMS_DIR = os.path.join(DATA_DIR, "exams")
@@ -394,6 +395,248 @@ def _deepseek_ocr_from_bytes(img_bytes: bytes, language: str = "vi") -> Optional
         return _ds_ocr(img_bytes, language=language)
     except Exception:
         return None
+
+def _normalize_num_token(tok: Optional[str]) -> Optional[float]:
+    if tok is None:
+        return None
+    s = str(tok).strip()
+    if not s:
+        return None
+    s = s.replace(" ", "").replace(",", ".")
+    if "/" in s and all(part.strip() for part in s.split("/", 1)):
+        try:
+            a, b = s.split("/", 1)
+            a = float(a); b = float(b)
+            if b != 0:
+                return a / b
+        except Exception:
+            pass
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+@app.post("/assessments/evaluate-with-key")
+async def evaluate_with_key(
+    exam_image: Optional[UploadFile] = File(None),
+    answer_key_image: Optional[UploadFile] = File(None),
+    submission_image: UploadFile = File(...),
+    language: str = Form("vi"),
+):
+    """
+    Evaluate submission against exam and answer key.
+    - Extract items and labels (B1.a, ...)
+    - Map student's steps and compare with expected steps from key
+    - Apply cascade rule: if a step is wrong, subsequent steps are considered wrong
+    - Return structured evaluation JSON
+    """
+    model = _get_gemini_model()
+
+    # Read bytes and optional OCR hints
+    exam_bytes = await exam_image.read() if exam_image is not None else None
+    key_bytes = await answer_key_image.read() if answer_key_image is not None else None
+    sub_bytes = await submission_image.read()
+    # Upload to Gemini for vision
+    exam_ref = None
+    key_ref = None
+    sub_ref = None
+    if exam_bytes and _is_likely_image_bytes(exam_bytes):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(exam_image.filename or "exam.png")[1] or ".png") as ef:
+            ef.write(exam_bytes); exam_tmp = ef.name
+        try:
+            exam_ref = _upload_to_gemini(exam_tmp, display_name=os.path.basename(exam_image.filename or "exam"))
+        finally:
+            try: os.remove(exam_tmp)
+            except Exception: pass
+    if key_bytes and _is_likely_image_bytes(key_bytes):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(answer_key_image.filename or "answer.png")[1] or ".png") as kf:
+            kf.write(key_bytes); key_tmp = kf.name
+        try:
+            key_ref = _upload_to_gemini(key_tmp, display_name=os.path.basename(answer_key_image.filename or "answer"))
+        finally:
+            try: os.remove(key_tmp)
+            except Exception: pass
+    if not _is_likely_image_bytes(sub_bytes):
+        raise HTTPException(status_code=400, detail="submission_image must be an image")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(submission_image.filename or "submission.png")[1] or ".png") as sf:
+        sf.write(sub_bytes); sub_tmp = sf.name
+    try:
+        sub_ref = _upload_to_gemini(sub_tmp, display_name=os.path.basename(submission_image.filename or "submission"))
+    finally:
+        try: os.remove(sub_tmp)
+        except Exception: pass
+
+    # OCR hints using DeepSeek (optional)
+    ocr_exam = _deepseek_ocr_from_bytes(exam_bytes, language=language) if exam_bytes else None
+    ocr_key = _deepseek_ocr_from_bytes(key_bytes, language=language) if key_bytes else None
+    ocr_sub = _deepseek_ocr_from_bytes(sub_bytes, language=language)
+
+    # Build prompt
+    prompt = {
+        "task": "evaluate_submission_items",
+        "instructions": [
+            "Parse the exam into big questions 'Bài x' and subparts 'a,b,c'.",
+            "Normalize labels as 'B1.a', 'B1.b', ... (ASCII only).",
+            "Extract short 'question' texts for each leaf.",
+            "Map student's answers from the submission to these leaf labels; set mapping_confidence.",
+            "Use the provided answer key to determine correctness and partial credit (prefer explicit markings).",
+            "Judge correctness; if no printed points, default 1 point per leaf.",
+            "Add a free-form 'skill_tag' for the math topic.",
+            "Step-level grading: for each item, extract solution_steps_expected (from key) and student_steps (from submission).",
+            "Align into step_evaluation array: {step_index, expected_step, student_step, matches_expected, error_type, notes}.",
+            "Return strictly valid JSON only.",
+        ],
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "parent_label": {"type": ["string","null"]},
+                            "question": {"type": ["string","null"]},
+                            "skill_tag": {"type": ["string","null"]},
+                            "student_answer": {"type": ["string","null"]},
+                            "correct_answer": {"type": ["string","null"]},
+                            "solution_steps_expected": {"type": ["array","null"], "items": {"type": "string"}},
+                            "student_steps": {"type": ["array","null"], "items": {"type": "string"}},
+                            "step_evaluation": {"type": ["array","null"], "items": {"type": "object"}},
+                            "mapping_confidence": {"type": ["number","null"]},
+                            "is_marked_correct": {"type": ["boolean","null"]},
+                            "llm_judgement_correct": {"type": ["boolean","null"]},
+                            "points": {"type": ["number","null"]},
+                            "points_earned": {"type": ["number","null"]},
+                            "rationale": {"type": ["string","null"]},
+                        },
+                        "required": ["label"],
+                        "additionalProperties": True
+                    }
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False
+        },
+        "ocr_hint": ocr_sub,
+        "answer_key_ocr": ocr_key,
+        "locale": language
+    }
+    parts = [json.dumps(prompt)]
+    if exam_ref: parts.append(exam_ref)
+    if key_ref: parts.append(key_ref)
+    if sub_ref: parts.append(sub_ref)
+    resp = model.generate_content(parts)
+    text = getattr(resp, "text", None) or "{}"
+    try:
+        evaluation = json.loads(text)
+    except Exception:
+        evaluation = {"raw": text}
+
+    # Post-process: numeric rule-check and cascade step rule
+    if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list):
+        for it in evaluation["items"]:
+            if not isinstance(it, dict):
+                continue
+            rc = _rule_check_correct(it.get("student_answer"), it.get("correct_answer"))
+            if rc is True:
+                it["llm_judgement_correct"] = True
+                try:
+                    pts = float(it.get("points") or 1.0)
+                except Exception:
+                    pts = 1.0
+                it["points"] = pts
+                it["points_earned"] = pts
+                it["rationale"] = (str(it.get("rationale")) + " | Final-result match") if it.get("rationale") else "Final-result match"
+            elif rc is False:
+                if it.get("points_earned") is None:
+                    it["points_earned"] = 0.0
+                it["llm_judgement_correct"] = False
+                it["rationale"] = (str(it.get("rationale")) + " | Final-result mismatch") if it.get("rationale") else "Final-result mismatch"
+            _cascade_step_fail_and_points(it)
+
+    return evaluation
+
+
+def _split_candidates(txt: Optional[str]):
+    if not txt:
+        return []
+    parts = re.split(r"[;\n,]+", str(txt))
+    return [p.strip() for p in parts if p.strip()]
+
+def _rule_check_correct(student: Optional[str], gold: Optional[str]) -> Optional[bool]:
+    if not student or not gold:
+        return None
+    s_parts = _split_candidates(student)
+    g_parts = _split_candidates(gold)
+    if s_parts and g_parts:
+        s_nums = [_normalize_num_token(x) for x in s_parts]
+        g_nums = [_normalize_num_token(x) for x in g_parts]
+        if all(v is not None for v in s_nums) and all(v is not None for v in g_nums):
+            if len(s_nums) == len(g_nums):
+                s_sorted = sorted(s_nums)
+                g_sorted = sorted(g_nums)
+                return all(abs(a - b) <= 1e-6 for a, b in zip(s_sorted, g_sorted))
+    sn = _normalize_num_token(student)
+    gn = _normalize_num_token(gold)
+    if sn is not None and gn is not None:
+        return abs(sn - gn) <= 1e-6
+    def norm(s: str) -> str:
+        s = re.sub(r"\s+", " ", s.strip().lower())
+        return s
+    if norm(student) == norm(gold):
+        return True
+    return None
+
+def _cascade_step_fail_and_points(it: Dict[str, Any]):
+    exp_steps = it.get("solution_steps_expected") or []
+    stu_steps = it.get("student_steps") or []
+    step_eval = it.get("step_evaluation") or []
+    if not isinstance(step_eval, list):
+        step_eval = []
+    n = max(len(exp_steps) if isinstance(exp_steps, list) else 0,
+            len(stu_steps) if isinstance(stu_steps, list) else 0,
+            len(step_eval))
+    # fill missing step entries
+    while len(step_eval) < n:
+        step_eval.append({})
+    wrong_seen = False
+    correct_count = 0
+    for i in range(n):
+        se = step_eval[i] if isinstance(step_eval[i], dict) else {}
+        # derive matches if missing by rough text compare
+        if se.get("matches_expected") is None:
+            e = (exp_steps[i] if i < len(exp_steps) else "") or ""
+            s = (stu_steps[i] if i < len(stu_steps) else "") or ""
+            if e and s and re.sub(r"\s+"," ",e).strip().lower() == re.sub(r"\s+"," ",s).strip().lower():
+                se["matches_expected"] = True
+            else:
+                se["matches_expected"] = False
+        # cascade rule: once wrong, all following wrong
+        if wrong_seen:
+            se["matches_expected"] = False
+            if not se.get("error_type"):
+                se["error_type"] = "CASCADE_AFTER_WRONG"
+        if se.get("matches_expected") is False and not wrong_seen:
+            wrong_seen = True
+        if not wrong_seen and se.get("matches_expected") is True:
+            correct_count += 1
+        step_eval[i] = se
+    it["step_evaluation"] = step_eval
+    # partial credit by steps until first wrong
+    try:
+        pts = float(it.get("points") or 1.0)
+    except Exception:
+        pts = 1.0
+    n_total = n if n > 0 else 1
+    earned = pts * (correct_count / n_total)
+    if it.get("points_earned") is None:
+        it["points_earned"] = round(earned, 2)
+    note = f"Cascade step rule: {correct_count}/{n_total} steps credited"
+    if it.get("rationale"):
+        it["rationale"] = str(it["rationale"]) + " | " + note
+    else:
+        it["rationale"] = note
 
 @app.get("/assessments/analyze-batch")
 def analyze_batch():
