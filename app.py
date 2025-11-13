@@ -16,6 +16,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import base64, requests
 from deepseek_ocr import ocr_bytes as _ds_ocr
+import difflib
+import unicodedata
 import re
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -587,12 +589,31 @@ def _rule_check_correct(student: Optional[str], gold: Optional[str]) -> Optional
     gn = _normalize_num_token(gold)
     if sn is not None and gn is not None:
         return abs(sn - gn) <= 1e-6
-    def norm(s: str) -> str:
-        s = re.sub(r"\s+", " ", s.strip().lower())
-        return s
-    if norm(student) == norm(gold):
+    # Accent-insensitive, whitespace-insensitive text match with similarity threshold
+    if _text_match(student, gold, threshold=0.96):
         return True
     return None
+
+def _normalize_text_for_compare(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKC", s)
+    # remove accents
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = s.lower().strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _text_match(a: Optional[str], b: Optional[str], threshold: float = 0.95) -> bool:
+    na = _normalize_text_for_compare(a)
+    nb = _normalize_text_for_compare(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    ratio = difflib.SequenceMatcher(a=na, b=nb).ratio()
+    return ratio >= max(0.0, min(1.0, threshold))
 
 def _cascade_step_fail_and_points(it: Dict[str, Any]):
     exp_steps = it.get("solution_steps_expected") or []
@@ -614,10 +635,7 @@ def _cascade_step_fail_and_points(it: Dict[str, Any]):
         if se.get("matches_expected") is None:
             e = (exp_steps[i] if i < len(exp_steps) else "") or ""
             s = (stu_steps[i] if i < len(stu_steps) else "") or ""
-            if e and s and re.sub(r"\s+"," ",e).strip().lower() == re.sub(r"\s+"," ",s).strip().lower():
-                se["matches_expected"] = True
-            else:
-                se["matches_expected"] = False
+            se["matches_expected"] = _text_match(e, s, threshold=0.96)
         # cascade rule: once wrong, all following wrong
         if wrong_seen:
             se["matches_expected"] = False
