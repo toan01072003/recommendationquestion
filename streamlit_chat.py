@@ -1,17 +1,19 @@
 import os
-import io
 import json
-import time
-import tempfile
-import re
-import unicodedata
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
-import requests
 
+# Import từ edurec_ui modules thay vì duplicate code
+from edurec_ui.services.gemini import (
+    get_model as _get_model_base,
+    upload_bytes_to_gemini,
+    wait_until_files_active,
+)
+from edurec_ui.services.backend import call_deepseek_ocr_api
+from edurec_ui.utils.anchors import build_anchors_from_text
 
 # Load .env for GOOGLE_API_KEY when running locally
 load_dotenv(override=False)
@@ -22,170 +24,33 @@ st.caption("Chạy thuần Streamlit, không cần gọi API nội bộ. Yêu c�
 
 
 # -------------------- Gemini helpers --------------------
+@st.cache_resource
 def get_model():
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        st.error("Thiếu GOOGLE_API_KEY/GEMINI_API_KEY trong môi trường (Secrets).")
+    """Cached Gemini model để tránh re-init mỗi lần chạy."""
+    try:
+        return _get_model_base()
+    except RuntimeError as e:
+        st.error(f"Lỗi khởi tạo Gemini: {e}")
         st.stop()
-    import google.generativeai as genai
-    genai.configure(api_key=api_key)
-    generation_config = {"temperature": 0.2, "response_mime_type": "application/json"}
-    return genai.GenerativeModel(
-        model_name=os.environ.get("GEMINI_MODEL", "gemini-1.5-flash"),
-        generation_config=generation_config,
-    )
 
 
 def is_likely_image_bytes(b: bytes) -> bool:
+    """Kiểm tra bytes có phải là ảnh hợp lệ không."""
     if not b or len(b) < 4:
         return False
+    # PNG
     if b.startswith(b"\x89PNG\r\n\x1a\n"):
         return True
+    # JPEG
     if b.startswith(b"\xff\xd8"):
         return True
+    # GIF
     if b.startswith(b"GIF8"):
         return True
-    if b.startswith(b"RIFF") and b[8:12] == b"WEBP":
+    # WebP
+    if b.startswith(b"RIFF") and len(b) > 12 and b[8:12] == b"WEBP":
         return True
     return False
-
-
-def upload_bytes_to_gemini(name: str, data: bytes):
-    import google.generativeai as genai
-    suffix = os.path.splitext(name)[1] or ".png"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
-        tf.write(data)
-        path = tf.name
-    try:
-        return genai.upload_file(path=path, display_name=name)
-    finally:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
-
-
-def wait_until_files_active(file_refs, timeout_sec: int = 90):
-    if not file_refs:
-        return
-    import google.generativeai as genai
-    start = time.time()
-    pending = list(file_refs)
-    while pending and (time.time() - start) < timeout_sec:
-        still = []
-        for f in pending:
-            try:
-                fid = getattr(f, "name", None) or getattr(f, "uri", None) or getattr(f, "id", None)
-                if not fid:
-                    continue
-                fresh = genai.get_file(fid)
-                sname = getattr(getattr(fresh, "state", None), "name", None) or str(getattr(fresh, "state", None))
-                if sname and "ACTIVE" in sname:
-                    continue
-                if sname and "FAILED" in sname:
-                    raise RuntimeError(f"Gemini file processing FAILED: {fid}")
-                still.append(f)
-            except Exception:
-                still.append(f)
-        if not still:
-            return
-        time.sleep(1.0)
-        pending = still
-
-
-# --------------- DeepSeek OCR via backend ---------------
-def call_deepseek_ocr_api(api_base: str, img_name: str, img_bytes: bytes, language: str = "vi") -> Optional[str]:
-    """Call FastAPI endpoint /ocr/deepseek-extract and return joined text or None.
-    Expects FastAPI app from app.py running at api_base (e.g., http://localhost:8000).
-    """
-    if not img_bytes:
-        return None
-    url = (api_base or "http://localhost:8000").rstrip("/") + "/ocr/deepseek-extract"
-    files = {"submission_image": (img_name or "submission.png", img_bytes, "application/octet-stream")}
-    data = {"language": language or "vi"}
-    try:
-        resp = requests.post(url, files=files, data=data, timeout=60)
-        resp.raise_for_status()
-        js = resp.json()
-        if isinstance(js, dict) and isinstance(js.get("lines"), list):
-            return "\n".join(str(x) for x in js["lines"])
-    except Exception:
-        return None
-    return None
-
-
-# -------------------- Anchor linking helpers --------------------
-def _strip_accents_lower(s: str) -> str:
-    try:
-        return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn").lower()
-    except Exception:
-        return (s or "").lower()
-
-
-def _detect_big_label(line: str) -> Optional[str]:
-    t = _strip_accents_lower(line or "").strip()
-    m = re.match(r"^(bai|bai\s*toan|bai\s*\w*)\s*(\d+)([^\d]|$)", t)
-    if m:
-        return f"B{int(m.group(2))}"
-    m = re.match(r"^(cau)\s*(\d+)([^\d]|$)", t)
-    if m:
-        return f"B{int(m.group(2))}"
-    m = re.match(r"^(\d+)\s*[\.)]", t)
-    if m:
-        return f"B{int(m.group(1))}"
-    m = re.match(r"^b\s*(\d+)([^\d]|$)", t)
-    if m:
-        return f"B{int(m.group(1))}"
-    return None
-
-
-def _detect_subpart_label(line: str) -> Optional[str]:
-    t = _strip_accents_lower(line or "").strip()
-    m = re.match(r"^([a-z])\s*[\)\.\-]", t)
-    if m:
-        ch = m.group(1)
-        if "a" <= ch <= "z":
-            return ch
-    m = re.match(r"^cau\s*([a-z])([^a-z]|$)", t)
-    if m:
-        return m.group(1)
-    return None
-
-
-def build_anchors_from_text(text: Optional[str]) -> List[Dict[str, Any]]:
-    if not text:
-        return []
-    lines = [ln for ln in str(text).splitlines()]
-    anchors: List[Dict[str, Any]] = []
-    current_big: Optional[str] = None
-    current_id: Optional[str] = None
-    buf: List[str] = []
-
-    def flush():
-        nonlocal buf, current_id
-        if current_id is not None and buf:
-            anchors.append({"anchor_id": current_id, "text": "\n".join(buf).strip()})
-        buf = []
-
-    for ln in lines:
-        big = _detect_big_label(ln)
-        sub = _detect_subpart_label(ln)
-        if big:
-            flush()
-            current_big = big
-            current_id = big
-            buf.append(ln)
-            continue
-        if sub and current_big:
-            flush()
-            current_id = f"{current_big}.{sub}"
-            buf.append(ln)
-            continue
-        if current_id is None and _strip_accents_lower(ln).strip():
-            current_id = current_big or "B0"
-        buf.append(ln)
-    flush()
-    return anchors
 
 
 # -------------------- Scoring helpers --------------------
@@ -336,10 +201,16 @@ for m in st.session_state.messages:
         st.write(m["content"]) 
 
 
-def run_pipeline(user_prompt: str):
+def run_pipeline(user_prompt: str, progress_bar=None):
+    """Pipeline chính để phân tích và chấm điểm bài làm."""
     model = get_model()
 
-    # Upload files
+    def update_progress(value: float, text: str):
+        if progress_bar:
+            progress_bar.progress(value, text)
+
+    # Step 1: Upload files to Gemini
+    update_progress(0.1, "Đang tải ảnh lên Gemini...")
     exam_refs = []
     sub_refs = []
     for f in (exams or []):
@@ -354,44 +225,53 @@ def run_pipeline(user_prompt: str):
     if not exam_refs and not sub_refs:
         return {"assistant": "Mình cần ít nhất một ảnh đề hoặc bài làm để phân tích."}
 
+    # Step 2: Wait for files to be active
+    update_progress(0.2, "Đang chờ Gemini xử lý ảnh...")
     try:
         wait_until_files_active(exam_refs + sub_refs)
-    except Exception as e:
-        pass
+    except RuntimeError as e:
+        return {"assistant": f"Lỗi khi xử lý ảnh: {e}"}
 
-    # Optional: DeepSeek OCR via backend for submission images
+    # Step 3: OCR via DeepSeek backend (optional)
+    update_progress(0.3, "Đang trích xuất văn bản (OCR)...")
     api_base = os.environ.get("EDUREC_API_BASE", "http://localhost:8000")
     ds_ocr_text = None
     exam_ocr_text = None
-    try:
-        texts = []
-        for f in (subs or []):
-            data = f.getvalue()
-            if is_likely_image_bytes(data):
-                t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
-                if t:
-                    texts.append(t)
-        if texts:
-            ds_ocr_text = "\n\n---\n\n".join(texts)
-        # OCR exam as well to build anchors on exam side
-        etexts = []
-        for f in (exams or []):
-            data = f.getvalue()
-            if is_likely_image_bytes(data):
-                t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
-                if t:
-                    etexts.append(t)
-        if etexts:
-            exam_ocr_text = "\n\n---\n\n".join(etexts)
-    except Exception:
-        ds_ocr_text = None
+    ocr_warning = None
 
-    # Evaluate: parse exam into Bài/ý labels and map answers
-    evaluation = {}
-    # Build anchors from OCR (if available)
+    texts = []
+    for f in (subs or []):
+        data = f.getvalue()
+        if is_likely_image_bytes(data):
+            t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
+            if t:
+                texts.append(t)
+    if texts:
+        ds_ocr_text = "\n\n---\n\n".join(texts)
+
+    # OCR exam as well to build anchors on exam side
+    etexts = []
+    for f in (exams or []):
+        data = f.getvalue()
+        if is_likely_image_bytes(data):
+            t = call_deepseek_ocr_api(api_base, f.name, data, language=lang)
+            if t:
+                etexts.append(t)
+    if etexts:
+        exam_ocr_text = "\n\n---\n\n".join(etexts)
+
+    # Warn if OCR failed but continue with Gemini vision
+    if not ds_ocr_text and not exam_ocr_text:
+        ocr_warning = "OCR backend không khả dụng, sử dụng Gemini vision trực tiếp."
+
+    # Step 4: Build anchors and evaluate
+    update_progress(0.4, "Đang phân tích cấu trúc đề...")
     exam_anchors = build_anchors_from_text(exam_ocr_text) if exam_ocr_text else []
     sub_anchors = build_anchors_from_text(ds_ocr_text) if ds_ocr_text else []
 
+    # Step 5: Evaluate with Gemini
+    update_progress(0.5, "Đang chấm điểm với Gemini...")
+    evaluation = {}
     eval_prompt = {
         "task": "evaluate_submission_items",
         "instructions": [
@@ -500,7 +380,8 @@ def run_pipeline(user_prompt: str):
     if not weak:
         weak = [{"skillId": "GENERAL.REVIEW", "severity": 0.5}]
 
-    # Build support plan and generate short practice
+    # Step 6: Build support plan and generate practice
+    update_progress(0.7, "Đang tạo bài luyện tập...")
     goal_frac = parse_goal(goal_text)
     user_frac = parse_goal(user_text)
     support_plan = build_support_plan(weak, goal_frac, user_frac, int(max_q))
@@ -537,7 +418,8 @@ def run_pipeline(user_prompt: str):
         except Exception:
             gen_questions = []
 
-    # Hints per wrong item
+    # Step 7: Generate hints for wrong items
+    update_progress(0.85, "Đang tạo gợi ý Socratic...")
     hint_questions: List[Dict[str, Any]] = []
     wrong_items = []
     if isinstance(evaluation, dict) and isinstance(evaluation.get("items"), list):
@@ -568,7 +450,8 @@ def run_pipeline(user_prompt: str):
         except Exception:
             hint_questions = []
 
-    # Compose assistant message
+    # Step 8: Compose final result
+    update_progress(1.0, "Hoàn tất!")
     earned = gradebook.get("totals", {}).get("earned")
     total = gradebook.get("totals", {}).get("total") or 0
     acc = f"{(earned/total*100):.0f}%" if total > 0 else "?"
@@ -582,6 +465,7 @@ def run_pipeline(user_prompt: str):
         "hints": hint_questions,
         "practice": gen_questions,
         "ocr_text": ds_ocr_text,
+        "ocr_warning": ocr_warning,
     }
 
 
@@ -590,45 +474,70 @@ if user := st.chat_input("Nhập tin nhắn để bắt đầu phân tích…"):
     st.session_state.messages.append({"role": "user", "content": user})
     with st.chat_message("user"):
         st.write(user)
-    with st.spinner("Đang phân tích và chấm điểm…"):
-        result = run_pipeline(user)
+
+    # Sử dụng progress bar thay vì spinner
+    progress_bar = st.progress(0, "Đang khởi tạo...")
+    result = run_pipeline(user, progress_bar=progress_bar)
+    progress_bar.empty()  # Xóa progress bar sau khi hoàn tất
+
     with st.chat_message("assistant"):
+        # Hiển thị warning nếu OCR không khả dụng
+        if result.get("ocr_warning"):
+            st.warning(result["ocr_warning"])
+
         st.write(result.get("assistant"))
+
         # Gradebook
         gb = result.get("gradebook", {})
         ent = gb.get("entries", [])
         if ent:
-            st.write("Bảng điểm theo mục:")
+            st.subheader("Bảng điểm theo mục")
             st.dataframe(
-                [{"Mục": e.get("label"), "Điểm": e.get("points_earned"), "/": e.get("points"), "Kỹ năng": e.get("skill_tag"), "Ghi chú": e.get("rationale")} for e in ent],
+                [
+                    {
+                        "Mục": e.get("label"),
+                        "Điểm": e.get("points_earned"),
+                        "/": e.get("points"),
+                        "Kỹ năng": e.get("skill_tag"),
+                        "Ghi chú": e.get("rationale"),
+                    }
+                    for e in ent
+                ],
                 use_container_width=True,
                 hide_index=True,
             )
+
         # Hints
         hints = result.get("hints", [])
         if hints:
-            st.write("Gợi ý theo từng mục sai:")
+            st.subheader("Gợi ý theo từng mục sai")
             for h in hints:
-                st.markdown(f"- `{h.get('label')}`: " + "; ".join([str(x) for x in (h.get("hints") or [])]))
+                hint_list = h.get("hints") or []
+                hint_text = "; ".join([str(x) for x in hint_list]) if hint_list else "Không có gợi ý"
+                st.markdown(f"- **{h.get('label')}**: {hint_text}")
+
         # Practice
         qs = result.get("practice", [])
         if qs:
-            st.write("Câu luyện tập gợi ý:")
+            st.subheader("Câu luyện tập gợi ý")
             for i, q in enumerate(qs, 1):
-                st.markdown(f"{i}. [{q.get('skillId')}] {q.get('question')}  ")
-                st.markdown(f"   Đáp án: {q.get('answer')}  ")
-                if q.get("solution_outline"):
-                    st.markdown(f"   Gợi ý lời giải: {q.get('solution_outline')}")
-                svg = q.get("diagram_svg")
-                if isinstance(svg, str) and svg.strip():
-                    components.html(svg, height=240)
-                elif q.get("diagram_description"):
-                    st.caption("Sơ đồ: " + str(q.get("diagram_description")))
+                with st.container():
+                    st.markdown(f"**{i}. [{q.get('skillId')}]** {q.get('question')}")
+                    st.markdown(f"*Đáp án:* {q.get('answer')}")
+                    if q.get("solution_outline"):
+                        st.markdown(f"*Gợi ý lời giải:* {q.get('solution_outline')}")
+                    svg = q.get("diagram_svg")
+                    if isinstance(svg, str) and svg.strip():
+                        components.html(svg, height=240)
+                    elif q.get("diagram_description"):
+                        st.caption("Sơ đồ: " + str(q.get("diagram_description")))
+
+        # Expandable sections
         with st.expander("JSON chi tiết (evaluation)"):
             st.code(json.dumps(result.get("evaluation"), ensure_ascii=False, indent=2))
-    # Also show OCR when present, near the end of the assistant block
-    # (Placed here to avoid disrupting the flow above.)
-    if result.get("ocr_text"):
-        with st.expander("DeepSeek OCR (submission)"):
-            st.code(result.get("ocr_text"))
+
+        if result.get("ocr_text"):
+            with st.expander("DeepSeek OCR (submission)"):
+                st.code(result.get("ocr_text"))
+
     st.session_state.messages.append({"role": "assistant", "content": result.get("assistant")})
