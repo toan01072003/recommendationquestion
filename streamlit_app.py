@@ -191,17 +191,27 @@ with st.sidebar:
 if clear:
     st.session_state.clear()
 
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "👋 Chào bạn! Tải ảnh đề và bài làm vào sidebar bên trái, nhập mục tiêu điểm, rồi gõ bất kỳ để bắt đầu pipeline phân tích:\n\n1️⃣ **Phân đề** - Tách câu hỏi thành các mục B1.a, B1.b...\n2️⃣ **Chấm điểm** - Đánh giá từng câu với AI\n3️⃣ **Phân tích** - Xác định kỹ năng yếu\n4️⃣ **Gợi ý** - Tạo bài luyện tập ZPD phù hợp"}
-    ]
+st.markdown("---")
 
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.write(m["content"]) 
+# Instructions
+st.info("""
+👋 **Hướng dẫn sử dụng:**
+
+1️⃣ Tải ảnh đề và bài làm vào **sidebar bên trái**
+2️⃣ Nhập **mục tiêu điểm** và số câu luyện
+3️⃣ Nhấn nút **"Bắt đầu phân tích"** bên dưới
+
+**Pipeline sẽ tự động:**
+- 🔍 Phân đề thành các mục B1.a, B1.b...
+- ✅ Chấm điểm từng câu với AI
+- 📊 Phân tích kỹ năng yếu
+- 📝 Tạo bài luyện tập ZPD phù hợp
+""")
+
+st.markdown("---")
 
 
-def run_pipeline(user_prompt: str, progress_bar=None):
+def run_pipeline(progress_bar=None):
     """Pipeline chính để phân tích và chấm điểm bài làm."""
     model = get_model()
 
@@ -469,75 +479,68 @@ def run_pipeline(user_prompt: str, progress_bar=None):
     }
 
 
-# -------------------- Chat input --------------------
-if user := st.chat_input("Nhập tin nhắn để bắt đầu phân tích…"):
-    st.session_state.messages.append({"role": "user", "content": user})
-    with st.chat_message("user"):
-        st.write(user)
-
-    # Sử dụng progress bar thay vì spinner
+# -------------------- Trigger pipeline analysis --------------------
+if st.button("🚀 Bắt đầu phân tích", type="primary", use_container_width=True):
+    # Sử dụng progress bar
     progress_bar = st.progress(0, "Đang khởi tạo...")
-    result = run_pipeline(user, progress_bar=progress_bar)
+    result = run_pipeline(progress_bar=progress_bar)
     progress_bar.empty()  # Xóa progress bar sau khi hoàn tất
 
-    with st.chat_message("assistant"):
-        # Hiển thị warning nếu OCR không khả dụng
-        if result.get("ocr_warning"):
-            st.warning(result["ocr_warning"])
+    # Hiển thị warning nếu OCR không khả dụng
+    if result.get("ocr_warning"):
+        st.warning(result["ocr_warning"])
 
-        st.write(result.get("assistant"))
+    st.success(result.get("assistant"))
 
-        # Gradebook
-        gb = result.get("gradebook", {})
-        ent = gb.get("entries", [])
-        if ent:
-            st.subheader("Bảng điểm theo mục")
-            st.dataframe(
-                [
-                    {
-                        "Mục": e.get("label"),
-                        "Điểm": e.get("points_earned"),
-                        "/": e.get("points"),
-                        "Kỹ năng": e.get("skill_tag"),
-                        "Ghi chú": e.get("rationale"),
-                    }
-                    for e in ent
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
+    # Gradebook
+    gb = result.get("gradebook", {})
+    ent = gb.get("entries", [])
+    if ent:
+        st.subheader("📊 Bảng điểm theo mục")
+        st.dataframe(
+            [
+                {
+                    "Mục": e.get("label"),
+                    "Điểm": e.get("points_earned"),
+                    "/": e.get("points"),
+                    "Kỹ năng": e.get("skill_tag"),
+                    "Ghi chú": e.get("rationale"),
+                }
+                for e in ent
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        # Hints
-        hints = result.get("hints", [])
-        if hints:
-            st.subheader("Gợi ý theo từng mục sai")
-            for h in hints:
-                hint_list = h.get("hints") or []
-                hint_text = "; ".join([str(x) for x in hint_list]) if hint_list else "Không có gợi ý"
-                st.markdown(f"- **{h.get('label')}**: {hint_text}")
+    # Hints
+    hints = result.get("hints", [])
+    if hints:
+        st.subheader("💡 Gợi ý theo từng mục sai")
+        for h in hints:
+            hint_list = h.get("hints") or []
+            hint_text = "; ".join([str(x) for x in hint_list]) if hint_list else "Không có gợi ý"
+            st.markdown(f"- **{h.get('label')}**: {hint_text}")
 
-        # Practice
-        qs = result.get("practice", [])
-        if qs:
-            st.subheader("Câu luyện tập gợi ý")
-            for i, q in enumerate(qs, 1):
-                with st.container():
-                    st.markdown(f"**{i}. [{q.get('skillId')}]** {q.get('question')}")
-                    st.markdown(f"*Đáp án:* {q.get('answer')}")
-                    if q.get("solution_outline"):
-                        st.markdown(f"*Gợi ý lời giải:* {q.get('solution_outline')}")
-                    svg = q.get("diagram_svg")
-                    if isinstance(svg, str) and svg.strip():
-                        components.html(svg, height=240)
-                    elif q.get("diagram_description"):
-                        st.caption("Sơ đồ: " + str(q.get("diagram_description")))
+    # Practice
+    qs = result.get("practice", [])
+    if qs:
+        st.subheader("📝 Câu luyện tập gợi ý")
+        for i, q in enumerate(qs, 1):
+            with st.container():
+                st.markdown(f"**{i}. [{q.get('skillId')}]** {q.get('question')}")
+                st.markdown(f"*Đáp án:* {q.get('answer')}")
+                if q.get("solution_outline"):
+                    st.markdown(f"*Gợi ý lời giải:* {q.get('solution_outline')}")
+                svg = q.get("diagram_svg")
+                if isinstance(svg, str) and svg.strip():
+                    components.html(svg, height=240)
+                elif q.get("diagram_description"):
+                    st.caption("Sơ đồ: " + str(q.get("diagram_description")))
 
-        # Expandable sections
-        with st.expander("JSON chi tiết (evaluation)"):
-            st.code(json.dumps(result.get("evaluation"), ensure_ascii=False, indent=2))
+    # Expandable sections
+    with st.expander("JSON chi tiết (evaluation)"):
+        st.code(json.dumps(result.get("evaluation"), ensure_ascii=False, indent=2))
 
-        if result.get("ocr_text"):
-            with st.expander("DeepSeek OCR (submission)"):
-                st.code(result.get("ocr_text"))
-
-    st.session_state.messages.append({"role": "assistant", "content": result.get("assistant")})
+    if result.get("ocr_text"):
+        with st.expander("DeepSeek OCR (submission)"):
+            st.code(result.get("ocr_text"))
