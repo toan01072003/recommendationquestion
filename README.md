@@ -33,21 +33,20 @@ DEEPSEEK_API_KEY=your_deepseek_key_here  # Optional
 
 ## Chạy Ứng Dụng
 
-### Option 1: Giao Diện Đầy Đủ (Recommended)
+### Option 1: Pipeline Phân Tích (Recommended)
 ```bash
-streamlit run streamlit_single.py
+streamlit run streamlit_app.py
 ```
-- ✅ Tất cả tính năng trong 1 trang (Chatbot + OCR + Evaluate)
-- ✅ Vertical scroll, không cần chuyển trang
-- ✅ Giao diện gọn gàng, dễ sử dụng
+- ✅ Pipeline AI tự động: Phân đề → Chấm điểm → Phân tích → Gợi ý
+- ✅ Giao diện chat trực quan với progress bar 8 bước
+- ✅ Không cần FastAPI backend, chỉ cần GOOGLE_API_KEY
 
-### Option 2: Chatbot Độc Lập
+### Option 2: File Backup
 ```bash
 streamlit run streamlit_chat.py
 ```
-- ✅ Chat AI với phân tích đầy đủ
-- ✅ Không cần FastAPI backend
-- ✅ Chỉ cần GOOGLE_API_KEY
+- ✅ Tương tự streamlit_app.py (backup file)
+- ✅ Cùng pipeline phân tích
 
 ### Option 3: FastAPI Backend (Optional)
 ```bash
@@ -66,25 +65,34 @@ Docs: http://localhost:8000/docs
 
 ```
 edurec_demo_v2/
-├── streamlit_single.py      # ⭐ Giao diện chính (tất cả trong 1 trang)
-├── streamlit_chat.py         # Chatbot độc lập
+├── streamlit_app.py          # ⭐ Pipeline phân tích chính
+├── streamlit_chat.py         # Backup file (tương tự app)
 ├── edurec_ui/                # Reusable UI components
 │   ├── services/
 │   │   ├── gemini.py         # Gemini AI integration
 │   │   └── backend.py        # FastAPI client
 │   └── utils/
 │       └── anchors.py        # Anchor detection (B1, B1.a, ...)
-├── app.py                    # FastAPI backend
+├── app.py                    # FastAPI backend (optional)
 └── requirements.txt
 ```
 
 ## Tính Năng Chính
 
-### 1. 🤖 Chatbot AI - Chấm điểm & Gợi ý
-- Upload đề thi và bài làm (nhiều trang)
-- AI phân tích tự động theo từng Bài/Câu
-- Chấm điểm chi tiết với rationale
-- Gợi ý bài tập luyện theo ZPD
+### 1. 🎯 Pipeline Phân Tích Bài Làm (8 bước)
+1. **Upload ảnh** - Tải đề thi và bài làm lên Gemini
+2. **Đợi xử lý** - Gemini vision xử lý ảnh
+3. **OCR** - DeepSeek trích xuất văn bản (optional)
+4. **Phân đề** - Tách thành B1.a, B1.b với anchor detection
+5. **Chấm điểm** - AI đánh giá từng câu với JSON Schema
+6. **Phân tích điểm yếu** - Xác định kỹ năng cần cải thiện
+7. **Tạo bài luyện** - Generate questions theo ZPD (0.6-0.8)
+8. **Gợi ý Socratic** - Hints cho câu sai
+
+**Kết quả:**
+- Bảng điểm chi tiết với rationale
+- Câu hỏi luyện tập cá nhân hóa
+- Hints theo từng mục sai
 
 ### 2. 📝 OCR & Phân tích cấu trúc
 - Trích xuất văn bản từ ảnh (DeepSeek OCR)

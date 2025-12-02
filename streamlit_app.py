@@ -18,9 +18,9 @@ from edurec_ui.utils.anchors import build_anchors_from_text
 # Load .env for GOOGLE_API_KEY when running locally
 load_dotenv(override=False)
 
-st.set_page_config(page_title="EduRec Chatbot", page_icon="🤖", layout="wide")
-st.title("EduRec Chatbot – Phân đề, ghép bài làm, chấm điểm và gợi ý")
-st.caption("Chạy thuần Streamlit, không cần gọi API nội bộ. Yêu cầu GOOGLE_API_KEY/GEMINI_API_KEY.")
+st.set_page_config(page_title="EduRec - Phân tích bài làm AI", page_icon="📚", layout="wide")
+st.title("📚 EduRec - Hệ thống phân tích bài làm thông minh")
+st.caption("Pipeline AI tự động: Phân đề → Chấm điểm → Phân tích điểm yếu → Gợi ý luyện tập")
 
 
 # -------------------- Gemini helpers --------------------
@@ -193,7 +193,7 @@ if clear:
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Chào bạn! Tải ảnh đề và bài làm vào sidebar, nhập mục tiêu điểm rồi nhắn bất kỳ để mình phân tích theo từng Bài/ý, ghép bài làm, chấm điểm, và gợi ý luyện tập."}
+        {"role": "assistant", "content": "👋 Chào bạn! Tải ảnh đề và bài làm vào sidebar bên trái, nhập mục tiêu điểm, rồi gõ bất kỳ để bắt đầu pipeline phân tích:\n\n1️⃣ **Phân đề** - Tách câu hỏi thành các mục B1.a, B1.b...\n2️⃣ **Chấm điểm** - Đánh giá từng câu với AI\n3️⃣ **Phân tích** - Xác định kỹ năng yếu\n4️⃣ **Gợi ý** - Tạo bài luyện tập ZPD phù hợp"}
     ]
 
 for m in st.session_state.messages:
